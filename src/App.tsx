@@ -474,12 +474,7 @@ The original product should remain the focus.`,
         ? Object.keys(data.featureDetails)[0] 
         : (data.features[0] || "");
 
-      const newPrompt = `Expert Marketer Decision:
-1. Product: ${data.brand} ${data.title}
-2. Highlight: "${keySpec}" using Template B (Cyan Circle).
-3. Hook: Create a compelling header based on the product (e.g., "${firstFeature ? firstFeature : 'Professional ' + data.brand + ' quality.'}").
-4. Style: Match the clean, minimalist aesthetic of the reference samples.
-5. Resolution: ${imageSize}.`;
+      const newPrompt = ``;
       
       setPrompt(newPrompt);
     } catch (err: any) {
