@@ -1,11 +1,22 @@
 import express from "express";
 import { createServer as createViteServer } from "vite";
 import * as cheerio from "cheerio";
+import {
+  savePromptVersion,
+  getPromptHistory,
+  restorePromptVersion,
+  getActiveBrandConfig,
+  getReferenceImages,
+  addReferenceImage,
+  removeReferenceImage,
+  exportBrandConfig,
+  importBrandConfig,
+} from "./db.js";
 
 const app = express();
 const PORT = 3000;
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 
 const ALLOWED_HOST = "www.webstaurantstore.com";
 
@@ -200,6 +211,103 @@ app.post("/api/scrape", async (req, res) => {
   } catch (error: any) {
     console.error("Scrape error:", error);
     res.status(500).json({ error: error.message || "Failed to scrape product" });
+  }
+});
+
+// --- Prompt Endpoints ---
+
+app.get("/api/prompts/:brandKey", (req, res) => {
+  try {
+    const config = getActiveBrandConfig(req.params.brandKey);
+    res.json(config ?? {});
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/prompts", (req, res) => {
+  try {
+    const { brandKey, promptType, content, label, author, notes } = req.body;
+    if (!brandKey || !promptType || content == null) {
+      return res.status(400).json({ error: "brandKey, promptType, and content are required" });
+    }
+    const result = savePromptVersion({ brandKey, promptType, content, label, author, notes });
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.get("/api/prompts/:brandKey/history", (req, res) => {
+  try {
+    const promptType = req.query.type as string | undefined;
+    const history = getPromptHistory(req.params.brandKey, promptType);
+    res.json(history);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/prompts/restore/:id", (req, res) => {
+  try {
+    const version = restorePromptVersion(Number(req.params.id));
+    if (!version) return res.status(404).json({ error: "Version not found" });
+    res.json(version);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Reference Image Endpoints ---
+
+app.get("/api/references/:brandKey", (req, res) => {
+  try {
+    const refs = getReferenceImages(req.params.brandKey);
+    res.json(refs);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/references", (req, res) => {
+  try {
+    const { brandKey, url } = req.body;
+    if (!brandKey || !url) {
+      return res.status(400).json({ error: "brandKey and url are required" });
+    }
+    const result = addReferenceImage(brandKey, url);
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.delete("/api/references/:id", (req, res) => {
+  try {
+    removeReferenceImage(Number(req.params.id));
+    res.json({ ok: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// --- Export / Import ---
+
+app.get("/api/export/:brandKey", (req, res) => {
+  try {
+    const data = exportBrandConfig(req.params.brandKey);
+    res.json(data);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post("/api/import", (req, res) => {
+  try {
+    importBrandConfig(req.body);
+    res.json({ ok: true });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
   }
 });
 
