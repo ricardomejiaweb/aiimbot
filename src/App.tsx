@@ -323,6 +323,7 @@ export default function App() {
   const loadBrandConfig = async (brandKey: string) => {
     try {
       const res = await fetch(`/api/prompts/${brandKey}`);
+      if (!res.ok) return;
       const config = await res.json();
       if (config.active_brand_rules) {
         setBrandRules(config.active_brand_rules);
@@ -360,7 +361,7 @@ export default function App() {
     setIsSaving(true);
     setSaveSuccess(false);
     try {
-      await fetch('/api/prompts', {
+      const res = await fetch('/api/prompts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -372,13 +373,17 @@ export default function App() {
           notes: saveNotes,
         }),
       });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.error || `Save failed (${res.status})`);
+      }
       setSavedBrandRules(brandRules);
       setSaveSuccess(true);
       setSaveLabel('');
       setSaveNotes('');
       setTimeout(() => setSaveSuccess(false), 2000);
-    } catch {
-      setError('Failed to save prompt');
+    } catch (e: any) {
+      setError(e.message || 'Failed to save prompt');
     } finally {
       setIsSaving(false);
     }
