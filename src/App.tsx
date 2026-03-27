@@ -1,6 +1,7 @@
 import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import { GoogleGenAI } from "@google/genai";
+import * as storage from './storage';
 import { 
   Upload, 
   Image as ImageIcon, 
@@ -342,63 +343,36 @@ export default function App() {
     loadStoredRefs(selectedBrand);
   }, [selectedBrand]);
 
-  const loadBrandConfig = async (brandKey: string) => {
-    try {
-      const res = await fetch(`/api/prompts/${brandKey}`);
-      if (!res.ok) return;
-      const config = await res.json();
-      if (config.active_brand_rules) {
-        setBrandRules(config.active_brand_rules);
-        setSavedBrandRules(config.active_brand_rules);
-      }
-    } catch {
-      // No saved config, use defaults
+  const loadBrandConfig = (brandKey: string) => {
+    const config = storage.getActiveBrandConfig(brandKey);
+    if (config?.active_brand_rules) {
+      setBrandRules(config.active_brand_rules);
+      setSavedBrandRules(config.active_brand_rules);
     }
   };
 
-  const loadStoredRefs = async (brandKey: string) => {
-    try {
-      const res = await fetch(`/api/references/${brandKey}`);
-      const refs = await res.json();
-      setStoredRefs(refs);
-    } catch {
-      setStoredRefs([]);
-    }
+  const loadStoredRefs = (brandKey: string) => {
+    setStoredRefs(storage.getReferenceImages(brandKey));
   };
 
-  const loadHistory = async (brandKey: string) => {
+  const loadHistory = (brandKey: string) => {
     setHistoryLoading(true);
-    try {
-      const res = await fetch(`/api/prompts/${brandKey}/history?type=brand_rules`);
-      const data = await res.json();
-      setHistoryData(data);
-    } catch {
-      setHistoryData([]);
-    } finally {
-      setHistoryLoading(false);
-    }
+    setHistoryData(storage.getPromptHistory(brandKey, 'brand_rules'));
+    setHistoryLoading(false);
   };
 
-  const handleSavePrompt = async () => {
+  const handleSavePrompt = () => {
     setIsSaving(true);
     setSaveSuccess(false);
     try {
-      const res = await fetch('/api/prompts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          brandKey: selectedBrand,
-          promptType: 'brand_rules',
-          content: brandRules,
-          label: saveLabel,
-          author: authorName,
-          notes: saveNotes,
-        }),
+      storage.savePromptVersion({
+        brandKey: selectedBrand,
+        promptType: 'brand_rules',
+        content: brandRules,
+        label: saveLabel,
+        author: authorName,
+        notes: saveNotes,
       });
-      if (!res.ok) {
-        const err = await res.json().catch(() => ({}));
-        throw new Error(err.error || `Save failed (${res.status})`);
-      }
       setSavedBrandRules(brandRules);
       setSaveSuccess(true);
       setSaveLabel('');
@@ -411,57 +385,39 @@ export default function App() {
     }
   };
 
-  const handleApplyVersion = async (version: PromptVersion) => {
-    try {
-      const res = await fetch(`/api/prompts/restore/${version.id}`, { method: 'POST' });
-      if (!res.ok) throw new Error('Apply failed');
-      setBrandRules(version.content);
-      setSavedBrandRules(version.content);
-      setAppliedVersionId(version.id);
-    } catch {
-      setError('Failed to apply version');
+  const handleApplyVersion = (version: PromptVersion) => {
+    const result = storage.restorePromptVersion(version.id);
+    if (!result) { setError('Failed to apply version'); return; }
+    setBrandRules(version.content);
+    setSavedBrandRules(version.content);
+    setAppliedVersionId(version.id);
+  };
+
+  const handleToggleStar = (version: PromptVersion) => {
+    const result = storage.togglePromptStar(version.id);
+    if (!result) return;
+    setHistoryData(prev =>
+      prev.map(v => v.id === version.id ? { ...v, starred: result.starred } : v)
+    );
+    if (viewingVersion?.id === version.id) {
+      setViewingVersion(prev => prev ? { ...prev, starred: result.starred } : prev);
     }
   };
 
-  const handleToggleStar = async (version: PromptVersion) => {
-    try {
-      const res = await fetch(`/api/prompts/${version.id}/star`, { method: 'PATCH' });
-      if (!res.ok) throw new Error('Toggle star failed');
-      const data = await res.json();
-      setHistoryData(prev =>
-        prev.map(v => v.id === version.id ? { ...v, starred: data.starred } : v)
-      );
-      if (viewingVersion?.id === version.id) {
-        setViewingVersion(prev => prev ? { ...prev, starred: data.starred } : prev);
-      }
-    } catch {
-      setError('Failed to update star');
+  const handleUpdateNotes = (id: number, notes: string) => {
+    const result = storage.updatePromptNotes(id, notes);
+    if (!result) { setError('Failed to update notes'); return; }
+    setHistoryData(prev =>
+      prev.map(v => v.id === id ? { ...v, notes } : v)
+    );
+    if (viewingVersion?.id === id) {
+      setViewingVersion(prev => prev ? { ...prev, notes } : prev);
     }
   };
 
-  const handleUpdateNotes = async (id: number, notes: string) => {
+  const handleExport = () => {
     try {
-      const res = await fetch(`/api/prompts/${id}/notes`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ notes }),
-      });
-      if (!res.ok) throw new Error('Update notes failed');
-      setHistoryData(prev =>
-        prev.map(v => v.id === id ? { ...v, notes } : v)
-      );
-      if (viewingVersion?.id === id) {
-        setViewingVersion(prev => prev ? { ...prev, notes } : prev);
-      }
-    } catch {
-      setError('Failed to update notes');
-    }
-  };
-
-  const handleExport = async () => {
-    try {
-      const res = await fetch(`/api/export/${selectedBrand}`);
-      const data = await res.json();
+      const data = storage.exportBrandConfig(selectedBrand);
       const blob = new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -481,39 +437,31 @@ export default function App() {
       const text = await file.text();
       const data = JSON.parse(text);
       data.author = authorName;
-      await fetch('/api/import', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
-      });
-      await loadBrandConfig(selectedBrand);
-      await loadStoredRefs(selectedBrand);
+      storage.importBrandConfig(data);
+      loadBrandConfig(selectedBrand);
+      loadStoredRefs(selectedBrand);
     } catch {
       setError('Failed to import config');
     }
     if (importFileRef.current) importFileRef.current.value = '';
   };
 
-  const handleAddRef = async () => {
+  const handleAddRef = () => {
     if (!newRefUrl.trim()) return;
     try {
-      await fetch('/api/references', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ brandKey: selectedBrand, url: newRefUrl.trim() }),
-      });
+      storage.addReferenceImage(selectedBrand, newRefUrl.trim());
       setNewRefUrl('');
       setShowAddRef(false);
-      await loadStoredRefs(selectedBrand);
+      loadStoredRefs(selectedBrand);
     } catch {
       setError('Failed to add reference image');
     }
   };
 
-  const handleRemoveRef = async (id: number) => {
+  const handleRemoveRef = (id: number) => {
     try {
-      await fetch(`/api/references/${id}`, { method: 'DELETE' });
-      await loadStoredRefs(selectedBrand);
+      storage.removeReferenceImage(id);
+      loadStoredRefs(selectedBrand);
     } catch {
       setError('Failed to remove reference image');
     }
