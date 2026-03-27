@@ -244,6 +244,29 @@ function computeDiffLines(a: string, b: string): Array<{ type: 'same' | 'added' 
   return result;
 }
 
+function computeSplitDiff(a: string, b: string): Array<{ left: { num: number; text: string; type: 'same' | 'removed' | 'empty' }; right: { num: number; text: string; type: 'same' | 'added' | 'empty' } }> {
+  const aLines = a.split('\n');
+  const bLines = b.split('\n');
+  const result: Array<{ left: { num: number; text: string; type: 'same' | 'removed' | 'empty' }; right: { num: number; text: string; type: 'same' | 'added' | 'empty' } }> = [];
+  let ai = 0, bi = 0;
+  while (ai < aLines.length || bi < bLines.length) {
+    const aLine = ai < aLines.length ? aLines[ai] : undefined;
+    const bLine = bi < bLines.length ? bLines[bi] : undefined;
+    if (aLine !== undefined && bLine !== undefined && aLine === bLine) {
+      result.push({ left: { num: ai + 1, text: aLine, type: 'same' }, right: { num: bi + 1, text: bLine, type: 'same' } });
+      ai++; bi++;
+    } else if (aLine !== undefined && (bLine === undefined || aLine !== bLine)) {
+      result.push({ left: { num: ai + 1, text: aLine, type: 'removed' }, right: { num: 0, text: '', type: 'empty' } });
+      ai++;
+    }
+    if (bLine !== undefined && (aLine === undefined || aLine !== bLine)) {
+      result.push({ left: { num: 0, text: '', type: 'empty' }, right: { num: bi + 1, text: bLine, type: 'added' } });
+      bi++;
+    }
+  }
+  return result;
+}
+
 export default function App() {
   const [referenceImgs, setReferenceImgs] = useState<ImageState[]>([]);
   const [productImg, setProductImg] = useState<ImageState>({ file: null, preview: null });
@@ -286,6 +309,8 @@ export default function App() {
   const [viewingVersion, setViewingVersion] = useState<PromptVersion | null>(null);
   const [detailNotesText, setDetailNotesText] = useState('');
   const [appliedVersionId, setAppliedVersionId] = useState<number | null>(null);
+  const [diffViewMode, setDiffViewMode] = useState<'split' | 'unified' | 'changes'>('split');
+  const [selectedVersionId, setSelectedVersionId] = useState<number | null>(null);
 
   // Collaboration state
   const [authorName, setAuthorName] = useState(() => localStorage.getItem('aiim-author') || '');
@@ -1238,291 +1263,315 @@ export default function App() {
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
-            className="fixed inset-0 z-[110] flex items-center justify-center bg-(--modal-backdrop) backdrop-blur-sm p-4"
-            onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); setViewingVersion(null); }}
+            className="fixed inset-0 z-110 flex items-center justify-center bg-(--modal-backdrop) backdrop-blur-sm p-4"
+            onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); setViewingVersion(null); setSelectedVersionId(null); }}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
               animate={{ scale: 1, opacity: 1 }}
               exit={{ scale: 0.95, opacity: 0 }}
-              className="bg-(--modal-bg) border border-(--border-hover) rounded-3xl p-8 max-w-3xl w-full max-h-[80vh] overflow-hidden flex flex-col shadow-(--shadow-canvas)"
+              className="bg-(--modal-bg) border border-(--border-hover) rounded-3xl w-full max-w-6xl h-[85vh] overflow-hidden flex shadow-(--shadow-canvas)"
               onClick={(e) => e.stopPropagation()}
             >
-              <div className="flex items-center justify-between mb-6">
-                <div className="flex items-center gap-3">
-                  {(viewingVersion || showDiff) && (
-                    <button
-                      onClick={() => { setViewingVersion(null); setShowDiff(false); setDiffVersions([null, null]); setDetailNotesText(''); }}
-                      className="text-[9px] font-black text-[#00AEEF] uppercase tracking-widest hover:text-[#0096ce] transition-colors flex items-center gap-1 mr-1"
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      Back
-                    </button>
-                  )}
-                  <History className="w-5 h-5 text-[#00AEEF]" />
-                  <h2 className="text-sm font-black uppercase tracking-[0.2em] text-(--fg)">
-                    {viewingVersion ? `Version #${viewingVersion.id}` : 'Version History'}
-                  </h2>
+              {/* Left Panel: Version List */}
+              <div className="w-[280px] shrink-0 border-r border-(--border) flex flex-col overflow-hidden">
+                <div className="px-5 py-4 border-b border-(--border) flex items-center justify-between shrink-0">
+                  <div className="flex items-center gap-2">
+                    <History className="w-4 h-4 text-[#00AEEF]" />
+                    <h2 className="text-xs font-black uppercase tracking-[0.15em] text-(--fg)">History</h2>
+                  </div>
+                  <button onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); setViewingVersion(null); setSelectedVersionId(null); }}>
+                    <X className="w-4 h-4 text-(--fg-label) hover:text-(--fg) transition-colors" />
+                  </button>
                 </div>
-                <button onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); setViewingVersion(null); }}>
-                  <X className="w-5 h-5 text-(--fg-label) hover:text-(--fg) transition-colors" />
-                </button>
-              </div>
-
-              {/* Detail View */}
-              {viewingVersion ? (() => {
-                const isApplied = appliedVersionId === viewingVersion.id || (appliedVersionId === null && viewingVersion.content === savedBrandRules);
-                return (
-                  <div className="flex-1 overflow-y-auto space-y-5 custom-scrollbar">
-                    {/* Version header */}
-                    <div className="flex items-center justify-between gap-4">
-                      <div className="flex items-center gap-3 min-w-0">
-                        <button onClick={() => handleToggleStar(viewingVersion)} className="shrink-0">
-                          <Star className={cn("w-4 h-4 transition-colors", viewingVersion.starred ? "text-yellow-400 fill-yellow-400" : "text-(--fg-dim) hover:text-yellow-400")} />
-                        </button>
-                        {viewingVersion.label && (
-                          <span className="text-[10px] font-black text-[#00AEEF] uppercase">{viewingVersion.label}</span>
-                        )}
-                        <span className="text-[9px] text-(--fg-faint) font-mono">#{viewingVersion.id}</span>
-                        {isApplied && (
-                          <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded-md text-[8px] font-black text-green-400 uppercase tracking-widest">
-                            <Check className="w-2.5 h-2.5" />
-                            Active
-                          </span>
-                        )}
-                      </div>
-                      {isApplied ? (
-                        <span className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg text-[8px] font-black uppercase tracking-widest flex items-center gap-1 shrink-0">
-                          <Check className="w-3 h-3" />
-                          Applied
-                        </span>
-                      ) : (
-                        <button
-                          onClick={() => handleApplyVersion(viewingVersion)}
-                          className="px-4 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all shrink-0"
-                        >
-                          Apply
-                        </button>
-                      )}
-                    </div>
-
-                    {/* Metadata */}
-                    <div className="flex items-center gap-4 text-[9px] text-(--fg-dim)">
-                      <span>{new Date(viewingVersion.created_at + 'Z').toLocaleString()}</span>
-                      {viewingVersion.author && (
-                        <span className="flex items-center gap-1">
-                          <Users className="w-3 h-3" />
-                          {viewingVersion.author}
-                        </span>
-                      )}
-                    </div>
-
-                    {/* Full prompt content */}
-                    <div className="space-y-2">
-                      <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Prompt Content</label>
-                      <div className="bg-(--bg-input) border border-(--border) rounded-xl p-5 font-mono text-[11px] text-(--fg-muted) leading-relaxed whitespace-pre-wrap max-h-[40vh] overflow-y-auto custom-scrollbar">
-                        {viewingVersion.content}
-                      </div>
-                    </div>
-
-                    {/* Comments section */}
-                    <div className="space-y-3 border-t border-(--border) pt-5">
-                      <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em] flex items-center gap-2">
-                        <MessageSquare className="w-3.5 h-3.5" />
-                        Comments
-                      </label>
-
-                      {viewingVersion.notes && (
-                        <div className="bg-(--bg-surface) border border-(--border) rounded-xl p-4">
-                          <div className="flex items-center gap-2 mb-2 text-[9px] text-(--fg-dim)">
-                            {viewingVersion.author && (
-                              <span className="font-black text-(--fg-label)">{viewingVersion.author}</span>
-                            )}
-                            <span>{new Date(viewingVersion.created_at + 'Z').toLocaleString()}</span>
-                          </div>
-                          <p className="text-[10px] text-(--fg-muted) leading-relaxed">{viewingVersion.notes}</p>
-                        </div>
-                      )}
-
-                      <div className="space-y-2">
-                        <textarea
-                          value={detailNotesText}
-                          onChange={(e) => setDetailNotesText(e.target.value)}
-                          placeholder={viewingVersion.notes ? "Update comment..." : "Add a comment..."}
-                          className="w-full h-20 bg-(--bg-input) border border-(--border) rounded-xl p-3 text-[10px] text-(--fg-muted) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 resize-none transition-all"
-                        />
-                        <button
-                          onClick={() => {
-                            if (!detailNotesText.trim()) return;
-                            const newNotes = viewingVersion.notes
-                              ? `${viewingVersion.notes}\n\n${detailNotesText.trim()}`
-                              : detailNotesText.trim();
-                            handleUpdateNotes(viewingVersion.id, newNotes);
-                            setDetailNotesText('');
-                          }}
-                          disabled={!detailNotesText.trim()}
-                          className="px-4 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
-                        >
-                          {viewingVersion.notes ? 'Add Comment' : 'Save Comment'}
-                        </button>
-                      </div>
-                    </div>
-                  </div>
-                );
-              })()
-
-              /* Diff View */
-              : showDiff && diffVersions[0] && diffVersions[1] ? (
-                <div className="flex-1 overflow-y-auto space-y-4">
-                  <div className="flex items-center justify-between">
-                    <p className="text-[10px] font-black text-(--fg-label) uppercase tracking-widest">
-                      Comparing: {diffVersions[0].label || `#${diffVersions[0].id}`} vs {diffVersions[1].label || `#${diffVersions[1].id}`}
-                    </p>
-                  </div>
-                  <div className="bg-(--bg-input) rounded-xl p-4 border border-(--border) font-mono text-[10px] leading-relaxed overflow-auto max-h-[50vh]">
-                    {computeDiffLines(diffVersions[0].content, diffVersions[1].content).map((line, i) => (
-                      <div
-                        key={i}
-                        className={cn(
-                          "px-2 py-0.5",
-                          line.type === 'added' && "bg-green-500/10 text-green-400",
-                          line.type === 'removed' && "bg-red-500/10 text-red-400",
-                          line.type === 'same' && "text-(--fg-faint)"
-                        )}
-                      >
-                        <span className="select-none mr-2 text-(--fg-dim)">
-                          {line.type === 'added' ? '+' : line.type === 'removed' ? '-' : ' '}
-                        </span>
-                        {line.text || '\u00A0'}
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )
-
-              /* List View */
-              : (
-                <div className="flex-1 overflow-y-auto space-y-2 custom-scrollbar">
+                <div className="flex-1 overflow-y-auto custom-scrollbar p-3 space-y-2">
                   {historyLoading ? (
                     <div className="flex items-center justify-center py-12">
-                      <Loader2 className="w-6 h-6 text-[#00AEEF] animate-spin" />
+                      <Loader2 className="w-5 h-5 text-[#00AEEF] animate-spin" />
                     </div>
                   ) : historyData.length === 0 ? (
                     <div className="text-center py-12 text-(--fg-faint)">
-                      <History className="w-8 h-8 mx-auto mb-3 opacity-30" />
-                      <p className="text-[11px] font-black uppercase tracking-widest">No versions saved yet</p>
-                      <p className="text-[10px] mt-1">Save a prompt to start tracking history</p>
+                      <History className="w-6 h-6 mx-auto mb-2 opacity-30" />
+                      <p className="text-[10px] font-black uppercase tracking-widest">No versions yet</p>
                     </div>
                   ) : (
-                    historyData.map((version) => {
+                    historyData.map((version, idx) => {
                       const isApplied = appliedVersionId === version.id || (appliedVersionId === null && version.content === savedBrandRules);
+                      const isSelected = selectedVersionId === version.id;
+                      const versionNum = `v${historyData.length - idx}`;
                       return (
-                        <div
+                        <button
                           key={version.id}
+                          onClick={() => {
+                            setSelectedVersionId(version.id);
+                            setViewingVersion(version);
+                            setDetailNotesText('');
+                            setShowDiff(false);
+                          }}
                           className={cn(
-                            "bg-(--bg-input) border rounded-xl p-4 hover:border-(--border-hover) transition-all group",
-                            isApplied ? "border-green-500/30" : "border-(--border)"
+                            "w-full text-left rounded-xl p-3.5 border transition-all",
+                            isSelected
+                              ? "border-[#00AEEF]/50 bg-[#00AEEF]/5 shadow-[0_0_20px_rgba(0,174,239,0.08)]"
+                              : "border-(--border) hover:border-(--border-hover) hover:bg-(--bg-surface)"
                           )}
                         >
-                          <div className="flex items-start gap-3">
-                            {/* Star button */}
-                            <button
-                              onClick={() => handleToggleStar(version)}
-                              className="mt-0.5 shrink-0 transition-colors"
-                            >
-                              <Star
-                                className={cn(
-                                  "w-4 h-4 transition-colors",
-                                  version.starred
-                                    ? "text-yellow-400 fill-yellow-400"
-                                    : "text-(--fg-dim) hover:text-yellow-400"
-                                )}
-                              />
-                            </button>
-
-                            <div
-                              className="flex-1 min-w-0 cursor-pointer"
-                              onClick={() => { setViewingVersion(version); setDetailNotesText(''); }}
-                            >
-                              <div className="flex items-center gap-2 mb-1">
-                                {version.label && (
-                                  <span className="text-[10px] font-black text-[#00AEEF] uppercase">{version.label}</span>
-                                )}
-                                <span className="text-[9px] text-(--fg-faint) font-mono">#{version.id}</span>
-                                {isApplied && (
-                                  <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded-md text-[8px] font-black text-green-400 uppercase tracking-widest">
-                                    <Check className="w-2.5 h-2.5" />
-                                    Active
-                                  </span>
-                                )}
-                                {version.notes && (
-                                  <span className="flex items-center gap-1 text-[9px] text-(--fg-dim)">
-                                    <MessageSquare className="w-3 h-3" />
-                                  </span>
-                                )}
-                              </div>
-                              <p className="text-[10px] text-(--fg-label) truncate">{version.content.slice(0, 120)}...</p>
-                              <div className="flex items-center gap-3 mt-2 text-[9px] text-(--fg-dim)">
-                                <span>{new Date(version.created_at + 'Z').toLocaleString()}</span>
-                                {version.author && (
-                                  <span className="flex items-center gap-1">
-                                    <Users className="w-3 h-3" />
-                                    {version.author}
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-
-                            {/* Action buttons */}
-                            <div className="flex items-center gap-2 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <div className="flex items-center gap-2 mb-1.5">
+                            <span className="text-[11px] font-black text-(--fg)">{versionNum}</span>
+                            {isApplied && (
+                              <span className="flex items-center gap-1 px-1.5 py-0.5 bg-green-500/10 border border-green-500/20 rounded text-[7px] font-black text-green-400 uppercase tracking-wider">
+                                <Check className="w-2.5 h-2.5" />
+                                {version.content === savedBrandRules ? 'Active' : 'Applied'}
+                              </span>
+                            )}
+                            <div className="ml-auto flex items-center gap-1.5">
                               <button
-                                onClick={() => { setViewingVersion(version); setDetailNotesText(''); }}
-                                className="px-3 py-1.5 bg-(--bg-surface) text-(--fg-label) border border-(--border) rounded-lg text-[8px] font-black uppercase tracking-widest hover:text-(--fg-secondary) transition-all flex items-center gap-1"
+                                onClick={(e) => { e.stopPropagation(); handleToggleStar(version); }}
+                                className="shrink-0"
                               >
-                                <Maximize2 className="w-3 h-3" />
-                                View
+                                <Star className={cn("w-3.5 h-3.5 transition-colors", version.starred ? "text-yellow-400 fill-yellow-400" : "text-(--fg-dim) hover:text-yellow-400")} />
                               </button>
-                              <button
-                                onClick={() => {
-                                  if (diffVersions[0] === null) {
-                                    setDiffVersions([version, null]);
-                                  } else if (diffVersions[1] === null) {
-                                    setDiffVersions([diffVersions[0], version]);
-                                    setShowDiff(true);
-                                  } else {
-                                    setDiffVersions([version, null]);
-                                  }
-                                }}
-                                className={cn(
-                                  "px-3 py-1.5 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all border",
-                                  diffVersions[0]?.id === version.id
-                                    ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/30"
-                                    : "bg-(--bg-surface) text-(--fg-label) border-(--border) hover:text-(--fg-secondary)"
-                                )}
-                              >
-                                {diffVersions[0]?.id === version.id ? 'Selected' : 'Compare'}
-                              </button>
-                              {isApplied ? (
-                                <span className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg text-[8px] font-black uppercase tracking-widest flex items-center gap-1">
-                                  <Check className="w-3 h-3" />
-                                  Applied
-                                </span>
-                              ) : (
-                                <button
-                                  onClick={() => handleApplyVersion(version)}
-                                  className="px-3 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all"
-                                >
-                                  Apply
-                                </button>
-                              )}
+                              {isApplied && <CheckCircle2 className="w-3.5 h-3.5 text-green-400" />}
                             </div>
                           </div>
-                        </div>
+                          {version.label && (
+                            <p className="text-[10px] font-bold text-(--fg-muted) mb-1">{version.label}</p>
+                          )}
+                          <p className="text-[9px] text-(--fg-faint)">
+                            {new Date(version.created_at + 'Z').toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}, {new Date(version.created_at + 'Z').toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })}
+                          </p>
+                          {version.author && (
+                            <div className="flex items-center gap-1 mt-1 text-[9px] text-(--fg-dim)">
+                              <Users className="w-3 h-3" />
+                              {version.author}
+                            </div>
+                          )}
+                          {/* Compare button */}
+                          {isSelected && historyData.length > 1 && (
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                const prevVersion = historyData[idx + 1] || historyData[idx - 1];
+                                if (prevVersion) {
+                                  setDiffVersions([prevVersion, version]);
+                                  setShowDiff(true);
+                                }
+                              }}
+                              className="mt-2 w-full py-1.5 bg-(--bg-surface) border border-(--border) rounded-lg text-[8px] font-black text-(--fg-label) uppercase tracking-widest hover:border-(--border-hover) transition-all"
+                            >
+                              Compare
+                            </button>
+                          )}
+                        </button>
                       );
                     })
                   )}
                 </div>
-              )}
+              </div>
+
+              {/* Right Panel: Diff / Detail View */}
+              <div className="flex-1 flex flex-col overflow-hidden">
+                {showDiff && diffVersions[0] && diffVersions[1] ? (
+                  <>
+                    {/* Diff Header */}
+                    <div className="px-6 py-4 border-b border-(--border) flex items-center justify-between shrink-0">
+                      <h3 className="text-xs font-black text-(--fg) uppercase tracking-[0.15em]">
+                        Diff View: {diffVersions[0].label || `#${diffVersions[0].id}`} vs. {diffVersions[1].label || `#${diffVersions[1].id}`}
+                      </h3>
+                      <div className="flex items-center gap-1">
+                        {(['unified', 'split', 'changes'] as const).map(mode => (
+                          <button
+                            key={mode}
+                            onClick={() => setDiffViewMode(mode)}
+                            className={cn(
+                              "px-3 py-1.5 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all border",
+                              diffViewMode === mode
+                                ? "bg-[#00AEEF]/10 text-[#00AEEF] border-[#00AEEF]/30"
+                                : "text-(--fg-faint) border-transparent hover:text-(--fg-label) hover:bg-(--bg-surface)"
+                            )}
+                          >
+                            {mode === 'unified' ? 'Unified View' : mode === 'split' ? 'Split View' : 'Show Changes'}
+                          </button>
+                        ))}
+                        <button
+                          onClick={() => { setShowDiff(false); }}
+                          className="ml-2 px-3 py-1.5 rounded-lg text-[8px] font-black text-(--fg-faint) uppercase tracking-widest hover:text-(--fg-label) hover:bg-(--bg-surface) transition-all"
+                        >
+                          Close Diff
+                        </button>
+                      </div>
+                    </div>
+                    {/* Diff Content */}
+                    <div className="flex-1 overflow-auto custom-scrollbar">
+                      {diffViewMode === 'split' ? (
+                        <div className="flex h-full">
+                          {/* Left: Previous */}
+                          <div className="flex-1 border-r border-(--border) overflow-auto custom-scrollbar">
+                            <div className="px-3 py-2 border-b border-(--border) bg-(--bg-surface) sticky top-0 z-10">
+                              <span className="text-[9px] font-black text-(--fg-faint) uppercase tracking-widest">Previous ({diffVersions[0].label || `#${diffVersions[0].id}`})</span>
+                            </div>
+                            <div className="font-mono text-[10px] leading-relaxed">
+                              {computeSplitDiff(diffVersions[0].content, diffVersions[1].content).map((row, i) => (
+                                <div key={`l-${i}`} className={cn("flex", row.left.type === 'removed' ? "bg-red-500/8" : row.left.type === 'empty' ? "bg-(--bg-surface-subtle)" : "")}>
+                                  <span className="w-8 shrink-0 text-right pr-2 text-[9px] text-(--fg-dim) select-none py-0.5">{row.left.num || ''}</span>
+                                  <span className={cn("flex-1 px-2 py-0.5 whitespace-pre-wrap", row.left.type === 'removed' ? "text-red-400" : row.left.type === 'empty' ? "text-transparent" : "text-(--fg-muted)")}>{row.left.text || '\u00A0'}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                          {/* Right: Current */}
+                          <div className="flex-1 overflow-auto custom-scrollbar">
+                            <div className="px-3 py-2 border-b border-(--border) bg-(--bg-surface) sticky top-0 z-10">
+                              <span className="text-[9px] font-black text-(--fg-faint) uppercase tracking-widest">Current ({diffVersions[1].label || `#${diffVersions[1].id}`})</span>
+                            </div>
+                            <div className="font-mono text-[10px] leading-relaxed">
+                              {computeSplitDiff(diffVersions[0].content, diffVersions[1].content).map((row, i) => (
+                                <div key={`r-${i}`} className={cn("flex", row.right.type === 'added' ? "bg-green-500/8" : row.right.type === 'empty' ? "bg-(--bg-surface-subtle)" : "")}>
+                                  <span className="w-8 shrink-0 text-right pr-2 text-[9px] text-(--fg-dim) select-none py-0.5">{row.right.num || ''}</span>
+                                  <span className={cn("flex-1 px-2 py-0.5 whitespace-pre-wrap", row.right.type === 'added' ? "text-green-400" : row.right.type === 'empty' ? "text-transparent" : "text-(--fg-muted)")}>{row.right.text || '\u00A0'}</span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </div>
+                      ) : (
+                        <div className="font-mono text-[10px] leading-relaxed p-4">
+                          {computeDiffLines(diffVersions[0].content, diffVersions[1].content)
+                            .filter(line => diffViewMode === 'changes' ? line.type !== 'same' : true)
+                            .map((line, i) => (
+                            <div
+                              key={i}
+                              className={cn(
+                                "flex py-0.5",
+                                line.type === 'added' && "bg-green-500/8",
+                                line.type === 'removed' && "bg-red-500/8"
+                              )}
+                            >
+                              <span className="w-8 shrink-0 text-right pr-2 text-[9px] text-(--fg-dim) select-none">{i + 1}</span>
+                              <span className="w-5 shrink-0 text-center select-none text-(--fg-dim)">
+                                {line.type === 'added' ? '+' : line.type === 'removed' ? '−' : ' '}
+                              </span>
+                              <span className={cn(
+                                "flex-1 px-2 whitespace-pre-wrap",
+                                line.type === 'added' ? "text-green-400" : line.type === 'removed' ? "text-red-400" : "text-(--fg-faint)"
+                              )}>{line.text || '\u00A0'}</span>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </>
+                ) : viewingVersion ? (() => {
+                  const isApplied = appliedVersionId === viewingVersion.id || (appliedVersionId === null && viewingVersion.content === savedBrandRules);
+                  return (
+                    <>
+                      {/* Detail Header */}
+                      <div className="px-6 py-4 border-b border-(--border) flex items-center justify-between shrink-0">
+                        <div className="flex items-center gap-3">
+                          <h3 className="text-xs font-black text-(--fg) uppercase tracking-[0.15em]">Version #{viewingVersion.id}</h3>
+                          {viewingVersion.label && (
+                            <span className="text-[10px] font-bold text-[#00AEEF]">{viewingVersion.label}</span>
+                          )}
+                          {isApplied && (
+                            <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded text-[7px] font-black text-green-400 uppercase tracking-wider">
+                              <Check className="w-2.5 h-2.5" />
+                              Active
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-2">
+                          {isApplied ? (
+                            <span className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg text-[8px] font-black uppercase tracking-widest flex items-center gap-1">
+                              <Check className="w-3 h-3" />
+                              Applied
+                            </span>
+                          ) : (
+                            <button
+                              onClick={() => handleApplyVersion(viewingVersion)}
+                              className="px-4 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all"
+                            >
+                              Apply
+                            </button>
+                          )}
+                        </div>
+                      </div>
+                      {/* Detail Content */}
+                      <div className="flex-1 overflow-y-auto custom-scrollbar p-6 space-y-5">
+                        <div className="flex items-center gap-4 text-[9px] text-(--fg-dim)">
+                          <span>{new Date(viewingVersion.created_at + 'Z').toLocaleString()}</span>
+                          {viewingVersion.author && (
+                            <span className="flex items-center gap-1"><Users className="w-3 h-3" />{viewingVersion.author}</span>
+                          )}
+                        </div>
+
+                        {/* Prompt content with line numbers */}
+                        <div className="bg-(--bg-input) border border-(--border) rounded-xl overflow-hidden">
+                          <div className="font-mono text-[10px] leading-relaxed max-h-[50vh] overflow-y-auto custom-scrollbar">
+                            {viewingVersion.content.split('\n').map((line, i) => (
+                              <div key={i} className="flex hover:bg-(--bg-surface)">
+                                <span className="w-10 shrink-0 text-right pr-3 text-[9px] text-(--fg-dim) select-none py-0.5 bg-(--bg-surface-subtle)">{i + 1}</span>
+                                <span className="flex-1 px-3 py-0.5 text-(--fg-muted) whitespace-pre-wrap">{line || '\u00A0'}</span>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+
+                        {/* Comments section */}
+                        <div className="space-y-3 border-t border-(--border) pt-5">
+                          <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em] flex items-center gap-2">
+                            <MessageSquare className="w-3.5 h-3.5" />
+                            Comments
+                          </label>
+                          {viewingVersion.notes && (
+                            <div className="bg-(--bg-surface) border border-(--border) rounded-xl p-4">
+                              <div className="flex items-center gap-2 mb-2 text-[9px] text-(--fg-dim)">
+                                {viewingVersion.author && <span className="font-black text-(--fg-label)">{viewingVersion.author}</span>}
+                                <span>{new Date(viewingVersion.created_at + 'Z').toLocaleString()}</span>
+                              </div>
+                              <p className="text-[10px] text-(--fg-muted) leading-relaxed whitespace-pre-wrap">{viewingVersion.notes}</p>
+                            </div>
+                          )}
+                          <div className="flex gap-2">
+                            <input
+                              type="text"
+                              value={detailNotesText}
+                              onChange={(e) => setDetailNotesText(e.target.value)}
+                              placeholder={viewingVersion.notes ? "Add another comment..." : "Add a comment..."}
+                              className="flex-1 bg-(--bg-input) border border-(--border) rounded-lg px-3 py-2 text-[10px] text-(--fg-muted) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
+                              onKeyDown={(e) => {
+                                if (e.key === 'Enter' && detailNotesText.trim()) {
+                                  const newNotes = viewingVersion.notes ? `${viewingVersion.notes}\n\n${detailNotesText.trim()}` : detailNotesText.trim();
+                                  handleUpdateNotes(viewingVersion.id, newNotes);
+                                  setDetailNotesText('');
+                                }
+                              }}
+                            />
+                            <button
+                              onClick={() => {
+                                if (!detailNotesText.trim()) return;
+                                const newNotes = viewingVersion.notes ? `${viewingVersion.notes}\n\n${detailNotesText.trim()}` : detailNotesText.trim();
+                                handleUpdateNotes(viewingVersion.id, newNotes);
+                                setDetailNotesText('');
+                              }}
+                              disabled={!detailNotesText.trim()}
+                              className="px-4 py-2 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                            >
+                              Post
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+                    </>
+                  );
+                })() : (
+                  <div className="flex-1 flex items-center justify-center text-(--fg-faint)">
+                    <div className="text-center space-y-3">
+                      <History className="w-10 h-10 mx-auto opacity-15" />
+                      <p className="text-[10px] font-black uppercase tracking-widest">Select a version</p>
+                      <p className="text-[9px] text-(--fg-dim)">Choose a version from the list to view details or compare changes</p>
+                    </div>
+                  </div>
+                )}
+              </div>
             </motion.div>
           </motion.div>
         )}
