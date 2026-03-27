@@ -41,6 +41,12 @@ db.exec(`
   CREATE INDEX IF NOT EXISTS idx_ri_brand ON reference_images(brand_key);
 `);
 
+try {
+  db.exec(`ALTER TABLE prompt_versions ADD COLUMN starred INTEGER DEFAULT 0`);
+} catch {
+  // Column already exists
+}
+
 // --- Prompt Versions ---
 
 export function savePromptVersion(params: {
@@ -95,6 +101,24 @@ export function restorePromptVersion(id: number) {
   if (!version) return null;
   upsertBrandConfig(version.brand_key, version.prompt_type, version.content);
   return version;
+}
+
+export function togglePromptStar(id: number) {
+  const current = db
+    .prepare(`SELECT starred FROM prompt_versions WHERE id = ?`)
+    .get(id) as { starred: number } | undefined;
+  if (!current) return null;
+  const newVal = current.starred ? 0 : 1;
+  db.prepare(`UPDATE prompt_versions SET starred = ? WHERE id = ?`).run(newVal, id);
+  return { id, starred: newVal };
+}
+
+export function updatePromptNotes(id: number, notes: string) {
+  const result = db
+    .prepare(`UPDATE prompt_versions SET notes = ? WHERE id = ?`)
+    .run(notes, id);
+  if (result.changes === 0) return null;
+  return { id, notes };
 }
 
 // --- Brand Configs ---

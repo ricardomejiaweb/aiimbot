@@ -6,6 +6,8 @@ import {
   getPromptHistory,
   restorePromptVersion,
   getActiveBrandConfig,
+  togglePromptStar,
+  updatePromptNotes,
   getReferenceImages,
   addReferenceImage,
   removeReferenceImage,
@@ -243,6 +245,28 @@ app.get("/api/prompts/:brandKey/history", (req, res) => {
     const promptType = req.query.type as string | undefined;
     const history = getPromptHistory(req.params.brandKey, promptType);
     res.json(history);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch("/api/prompts/:id/star", (req, res) => {
+  try {
+    const result = togglePromptStar(Number(req.params.id));
+    if (!result) return res.status(404).json({ error: "Version not found" });
+    res.json(result);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.patch("/api/prompts/:id/notes", (req, res) => {
+  try {
+    const { notes } = req.body;
+    if (notes == null) return res.status(400).json({ error: "notes is required" });
+    const result = updatePromptNotes(Number(req.params.id), notes);
+    if (!result) return res.status(404).json({ error: "Version not found" });
+    res.json(result);
   } catch (error: any) {
     res.status(500).json({ error: error.message });
   }

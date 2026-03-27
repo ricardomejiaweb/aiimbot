@@ -13,16 +13,11 @@ import {
   Key,
   Download,
   X,
-  Plus,
   Search,
   Globe,
-  Info,
   Layers,
   Check,
-  Tag,
   ShieldCheck,
-  ChevronDown,
-  ChevronUp,
   Play,
   Save,
   History,
@@ -33,7 +28,8 @@ import {
   MessageSquare,
   Copy,
   Sun,
-  Moon
+  Moon,
+  Star
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
 import { clsx, type ClassValue } from 'clsx';
@@ -201,6 +197,7 @@ interface PromptVersion {
   author: string;
   notes: string;
   created_at: string;
+  starred: number;
 }
 
 interface StoredRef {
@@ -256,11 +253,12 @@ export default function App() {
   const [selectedBrand, setSelectedBrand] = useState<BrandKey>('acopa');
   const [brandRules, setBrandRules] = useState(BRANDS.acopa.rules);
   const [savedBrandRules, setSavedBrandRules] = useState(BRANDS.acopa.rules);
-  const [assetType, setAssetType] = useState<AssetType>('hero');
+  const [selectedAssetTypes, setSelectedAssetTypes] = useState<Set<AssetType>>(new Set(['hero', 'feature']));
   const [imageSize, setImageSize] = useState<'512px' | '1K' | '2K' | '4K'>('1K');
   const [prompt, setPrompt] = useState(DEFAULT_PROMPT);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [resultImage, setResultImage] = useState<string | null>(null);
+  const [resultImages, setResultImages] = useState<Partial<Record<AssetType, string>>>({});
+  const [activeResultTab, setActiveResultTab] = useState<AssetType>('hero');
   const [refinementPrompt, setRefinementPrompt] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
@@ -285,6 +283,9 @@ export default function App() {
   const [historyLoading, setHistoryLoading] = useState(false);
   const [diffVersions, setDiffVersions] = useState<[PromptVersion | null, PromptVersion | null]>([null, null]);
   const [showDiff, setShowDiff] = useState(false);
+  const [viewingVersion, setViewingVersion] = useState<PromptVersion | null>(null);
+  const [detailNotesText, setDetailNotesText] = useState('');
+  const [appliedVersionId, setAppliedVersionId] = useState<number | null>(null);
 
   // Collaboration state
   const [authorName, setAuthorName] = useState(() => localStorage.getItem('aiim-author') || '');
@@ -294,10 +295,6 @@ export default function App() {
   const [storedRefs, setStoredRefs] = useState<StoredRef[]>([]);
   const [newRefUrl, setNewRefUrl] = useState('');
   const [showAddRef, setShowAddRef] = useState(false);
-
-  // Scraped data display state
-  const [showFeatureDetails, setShowFeatureDetails] = useState(false);
-  const [showAllSpecs, setShowAllSpecs] = useState(false);
 
   // Import file ref
   const importFileRef = useRef<HTMLInputElement>(null);
@@ -389,14 +386,50 @@ export default function App() {
     }
   };
 
-  const handleRestoreVersion = async (version: PromptVersion) => {
+  const handleApplyVersion = async (version: PromptVersion) => {
     try {
-      await fetch(`/api/prompts/restore/${version.id}`, { method: 'POST' });
+      const res = await fetch(`/api/prompts/restore/${version.id}`, { method: 'POST' });
+      if (!res.ok) throw new Error('Apply failed');
       setBrandRules(version.content);
       setSavedBrandRules(version.content);
-      setShowHistory(false);
+      setAppliedVersionId(version.id);
     } catch {
-      setError('Failed to restore version');
+      setError('Failed to apply version');
+    }
+  };
+
+  const handleToggleStar = async (version: PromptVersion) => {
+    try {
+      const res = await fetch(`/api/prompts/${version.id}/star`, { method: 'PATCH' });
+      if (!res.ok) throw new Error('Toggle star failed');
+      const data = await res.json();
+      setHistoryData(prev =>
+        prev.map(v => v.id === version.id ? { ...v, starred: data.starred } : v)
+      );
+      if (viewingVersion?.id === version.id) {
+        setViewingVersion(prev => prev ? { ...prev, starred: data.starred } : prev);
+      }
+    } catch {
+      setError('Failed to update star');
+    }
+  };
+
+  const handleUpdateNotes = async (id: number, notes: string) => {
+    try {
+      const res = await fetch(`/api/prompts/${id}/notes`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ notes }),
+      });
+      if (!res.ok) throw new Error('Update notes failed');
+      setHistoryData(prev =>
+        prev.map(v => v.id === id ? { ...v, notes } : v)
+      );
+      if (viewingVersion?.id === id) {
+        setViewingVersion(prev => prev ? { ...prev, notes } : prev);
+      }
+    } catch {
+      setError('Failed to update notes');
     }
   };
 
@@ -517,7 +550,7 @@ export default function App() {
     });
   };
 
-  const buildGenerationText = (refCount: number) => {
+  const buildGenerationText = (refCount: number, forAssetType: AssetType) => {
     const vars: Record<string, string> = {
       refCount: String(refCount),
       productTitle: scrapedData ? `Product Title: ${scrapedData.title}` : '',
@@ -525,7 +558,7 @@ export default function App() {
       productSpecs: scrapedData?.specs
         ? `Key Specs: ${Object.entries(scrapedData.specs).slice(0, 6).map(([k, v]) => `${k}: ${v}`).join(', ')}`
         : '',
-      assetType: assetType.toUpperCase(),
+      assetType: forAssetType.toUpperCase(),
       prompt: prompt,
     };
     let text = DEFAULT_GENERATION_TEMPLATE;
@@ -559,8 +592,15 @@ export default function App() {
       setError("Please upload a product image.");
       return;
     }
+    if (selectedAssetTypes.size === 0) {
+      setError("Please select at least one asset type.");
+      return;
+    }
     setIsGenerating(true);
     setError(null);
+    setResultImages({});
+    const types: AssetType[] = Array.from(selectedAssetTypes);
+    setActiveResultTab(types[0]);
     try {
       const apiKey = process.env.API_KEY || process.env.GEMINI_API_KEY;
       if (!apiKey) throw new Error("No API key found. Please select an API key.");
@@ -581,33 +621,32 @@ export default function App() {
 
       const prodBase64 = await fileToBase64(productImg.file);
 
-      const response = await ai.models.generateContent({
-        model: 'gemini-3.1-flash-image-preview',
-        contents: {
-          parts: [
-            ...refParts,
-            { inlineData: { data: prodBase64, mimeType: productImg.file.type } },
-            { text: buildGenerationText(refParts.length) },
-          ],
-        },
-        config: {
-          systemInstruction: brandRules + "\n\nContext: Analyze all provided reference images to understand the consistent layout, lighting, and shadow styles of the brand.",
-          imageConfig: { aspectRatio: "1:1", imageSize: imageSize }
-        },
-      });
+      for (const assetType of types) {
+        const response = await ai.models.generateContent({
+          model: 'gemini-3.1-flash-image-preview',
+          contents: {
+            parts: [
+              ...refParts,
+              { inlineData: { data: prodBase64, mimeType: productImg.file!.type } },
+              { text: buildGenerationText(refParts.length, assetType) },
+            ],
+          },
+          config: {
+            systemInstruction: brandRules + "\n\nContext: Analyze all provided reference images to understand the consistent layout, lighting, and shadow styles of the brand.",
+            imageConfig: { aspectRatio: "1:1", imageSize: imageSize }
+          },
+        });
 
-      let foundImage = false;
-      const candidates = response.candidates;
-      if (candidates && candidates.length > 0) {
-        for (const part of candidates[0].content.parts) {
-          if (part.inlineData) {
-            setResultImage(`data:image/png;base64,${part.inlineData.data}`);
-            foundImage = true;
-            break;
+        const candidates = response.candidates;
+        if (candidates && candidates.length > 0) {
+          for (const part of candidates[0].content.parts) {
+            if (part.inlineData) {
+              setResultImages(prev => ({ ...prev, [assetType]: `data:image/png;base64,${part.inlineData!.data}` }));
+              break;
+            }
           }
         }
       }
-      if (!foundImage) throw new Error("No image was generated in the response.");
     } catch (err: any) {
       console.error(err);
       if (err.message?.includes("403") || err.message?.includes("PERMISSION_DENIED") || err.message?.includes("Requested entity was not found")) {
@@ -622,7 +661,8 @@ export default function App() {
   };
 
   const handleRefine = async () => {
-    if (!resultImage || !refinementPrompt.trim()) return;
+    const currentImage = resultImages[activeResultTab];
+    if (!currentImage || !refinementPrompt.trim()) return;
     setIsGenerating(true);
     setError(null);
     try {
@@ -630,8 +670,8 @@ export default function App() {
       if (!apiKey) throw new Error("No API key found. Please select an API key.");
 
       const ai = new GoogleGenAI({ apiKey });
-      const currentImageBase64 = resultImage.split(',')[1];
-      const mimeType = resultImage.split(';')[0].split(':')[1];
+      const currentImageBase64 = currentImage.split(',')[1];
+      const mimeType = currentImage.split(';')[0].split(':')[1];
 
       const response = await ai.models.generateContent({
         model: 'gemini-3.1-flash-image-preview',
@@ -652,7 +692,7 @@ export default function App() {
       if (candidates && candidates.length > 0) {
         for (const part of candidates[0].content.parts) {
           if (part.inlineData) {
-            setResultImage(`data:image/png;base64,${part.inlineData.data}`);
+            setResultImages(prev => ({ ...prev, [activeResultTab]: `data:image/png;base64,${part.inlineData!.data}` }));
             setRefinementPrompt('');
             foundImage = true;
             break;
@@ -692,8 +732,6 @@ export default function App() {
       const data = await response.json();
       if (data.error) throw new Error(data.error);
       setScrapedData(data);
-      setShowFeatureDetails(false);
-      setShowAllSpecs(false);
 
       if (data.galleryImages && data.galleryImages.length > 0) {
         const bestImage = data.galleryImages.find((url: string) => 
@@ -724,690 +762,474 @@ export default function App() {
   };
 
   const allRefUrls = getAllReferenceUrls();
+  const currentResultImage = resultImages[activeResultTab] ?? null;
+  const hasAnyResult = Object.keys(resultImages).length > 0;
+
+  const toggleAssetType = (type: AssetType) => {
+    setSelectedAssetTypes(prev => {
+      const next = new Set(prev);
+      if (next.has(type)) {
+        next.delete(type);
+      } else {
+        next.add(type);
+      }
+      return next;
+    });
+  };
 
   return (
-    <div data-theme={theme} className="min-h-screen bg-(--bg-page) text-(--fg) font-sans selection:bg-[#00AEEF]/30">
-      {/* Header */}
-      <header className="bg-(--header-bg) backdrop-blur-xl border-b border-(--border) px-4 sm:px-8 py-5 flex flex-wrap items-center justify-between sticky top-0 z-50 gap-4">
-        <div className="flex items-center gap-4">
-          <div className="relative group">
-            <div className="absolute -inset-1 bg-[#00AEEF] rounded-xl blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
-            <div className="relative w-11 h-11 bg-[#00AEEF] rounded-xl flex items-center justify-center shadow-md">
-              <Sparkles className="text-white w-6 h-6" />
+    <div data-theme={theme} className="h-screen bg-(--bg-page) text-(--fg) font-sans selection:bg-[#00AEEF]/30 flex overflow-hidden">
+      {/* Sidebar */}
+      <aside className="w-[280px] shrink-0 bg-(--bg-card) border-r border-(--border) flex flex-col h-screen overflow-hidden">
+        {/* Sidebar Header */}
+        <div className="px-5 py-4 border-b border-(--border) flex items-center justify-between shrink-0">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 bg-[#00AEEF] rounded-xl flex items-center justify-center shadow-md">
+              <Sparkles className="text-white w-5 h-5" />
             </div>
+            <h1 className="text-sm font-black tracking-tight text-(--fg) uppercase">AIIM Bot <span className="font-normal text-(--fg-label)">Studio</span></h1>
           </div>
-          <div>
-            <h1 className="text-lg font-black tracking-tighter text-(--fg) uppercase italic">AIIM Bot<span className="text-[#00AEEF]">.</span></h1>
-          </div>
-        </div>
-        
-        <div className="flex items-center gap-3">
-          <button
-            onClick={toggleTheme}
-            className="flex items-center gap-2 px-4 py-2.5 bg-(--bg-surface) text-(--fg-muted) rounded-full text-[10px] font-black uppercase tracking-widest border border-(--border) hover:bg-(--bg-surface-hover) transition-all active:scale-95"
-          >
-            {theme === 'dark' ? <Sun className="w-3.5 h-3.5" /> : <Moon className="w-3.5 h-3.5" />}
-            {theme === 'dark' ? 'Light' : 'Dark'}
-          </button>
-          <button
-            onClick={() => setShowSettings(true)}
-            className="flex items-center gap-2 px-4 py-2.5 bg-(--bg-surface) text-(--fg-muted) rounded-full text-[10px] font-black uppercase tracking-widest border border-(--border) hover:bg-(--bg-surface-hover) transition-all active:scale-95"
-          >
-            <Settings2 className="w-3.5 h-3.5" />
-            Settings
-          </button>
-          {!hasApiKey && (
-            <button 
-              onClick={openKeyDialog}
-              className="flex items-center gap-2 px-5 py-2.5 bg-[#00AEEF]/10 text-[#00AEEF] rounded-full text-[10px] font-black uppercase tracking-widest border border-[#00AEEF]/20 hover:bg-[#00AEEF]/20 transition-all active:scale-95"
-            >
-              <Key className="w-3.5 h-3.5" />
-              Connect API
+          <div className="flex items-center gap-1">
+            <button onClick={toggleTheme} className="w-8 h-8 flex items-center justify-center rounded-lg text-(--fg-faint) hover:text-(--fg) hover:bg-(--bg-surface) transition-all">
+              {theme === 'dark' ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
             </button>
-          )}
+            <button onClick={() => setShowSettings(true)} className="w-8 h-8 flex items-center justify-center rounded-lg text-(--fg-faint) hover:text-(--fg) hover:bg-(--bg-surface) transition-all">
+              <Settings2 className="w-4 h-4" />
+            </button>
+          </div>
         </div>
-      </header>
 
-      <main className="max-w-[1600px] mx-auto p-4 sm:p-8 lg:p-12 grid grid-cols-1 lg:grid-cols-12 gap-8 lg:gap-16">
-        {/* Left Column: Configuration */}
-        <div className="lg:col-span-4 space-y-12">
-          {/* Brand Configuration */}
-          <section className="space-y-8">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3 text-(--fg-label)">
-                <Tag className="w-4 h-4" />
-                <h2 className="font-black uppercase tracking-[0.3em] text-[10px]">Brand Identity</h2>
-              </div>
-              <div className="h-[1px] flex-1 bg-(--border) ml-4" />
-            </div>
-            <div className="bg-(--bg-card) rounded-[2.5rem] border border-(--border) p-6 md:p-10 space-y-8 shadow-(--shadow-card) relative overflow-hidden group">
-              <div className="absolute top-0 right-0 w-32 h-32 bg-(--glow-subtle) blur-3xl rounded-full -mr-16 -mt-16 group-hover:bg-(--glow-hover) transition-colors" />
-              
-              <div className="space-y-4 relative">
-                <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Active Profile</label>
-                <div className="grid grid-cols-1 gap-3">
-                  {(Object.keys(BRANDS) as BrandKey[]).map((key) => (
-                    <button
-                      key={key}
-                      onClick={() => {
-                        setSelectedBrand(key);
-                        setBrandRules(BRANDS[key].rules);
-                        setSavedBrandRules(BRANDS[key].rules);
-                      }}
-                      className={cn(
-                        "flex items-center gap-5 p-5 rounded-2xl border transition-all duration-300 active:scale-[0.98]",
-                        selectedBrand === key 
-                          ? "border-[#00AEEF]/50 bg-[#00AEEF]/10 text-(--fg) shadow-[0_0_30px_rgba(0,174,239,0.1)]" 
-                          : "border-(--border) hover:border-(--border-hover) text-(--fg-label) hover:bg-(--bg-surface)"
-                      )}
-                    >
-                      <div 
-                        className="w-5 h-5 rounded-lg shadow-sm flex items-center justify-center text-[10px] font-black text-white" 
-                        style={{ backgroundColor: BRANDS[key].color }}
-                      >
-                        {BRANDS[key].name[0]}
-                      </div>
-                      <span className="text-[11px] font-black uppercase tracking-widest">{BRANDS[key].name}</span>
-                      {selectedBrand === key && (
-                        <motion.div layoutId="active-brand" className="ml-auto">
-                          <Check className="w-4 h-4 text-[#00AEEF]" />
-                        </motion.div>
-                      )}
-                    </button>
-                  ))}
-                </div>
-              </div>
-
-              {/* Brand Rules Editor */}
-              <div className="space-y-4 relative">
-                <div className="flex items-center justify-between">
-                  <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em] flex items-center gap-2">
-                    <ShieldCheck className="w-3.5 h-3.5" />
-                    Design Logic
-                  </label>
-                  <div className="flex items-center gap-2">
-                    <button 
-                      onClick={() => {
-                        setShowHistory(true);
-                        loadHistory(selectedBrand);
-                      }}
-                      className="text-[9px] font-black text-(--fg-label) hover:text-[#00AEEF] uppercase tracking-widest transition-colors flex items-center gap-1"
-                    >
-                      <History className="w-3 h-3" />
-                      History
-                    </button>
-                    <button 
-                      onClick={() => setBrandRules(savedBrandRules)}
-                      className="text-[9px] font-black text-[#00AEEF] hover:text-[#0096ce] uppercase tracking-widest transition-colors flex items-center gap-1.5"
-                    >
-                      <RotateCcw className="w-3 h-3" />
-                      Reset
-                    </button>
-                  </div>
-                </div>
-
-                {/* Unsaved changes indicator */}
-                {brandRules !== savedBrandRules && (
-                  <div className="flex items-center gap-2 px-3 py-2 bg-yellow-500/5 border border-yellow-500/15 rounded-xl">
-                    <div className="w-1.5 h-1.5 rounded-full bg-yellow-400 animate-pulse" />
-                    <span className="text-[9px] font-black text-yellow-400/80 uppercase tracking-widest">Unsaved changes</span>
-                  </div>
-                )}
-
-                {/* Textarea */}
-                <div className="relative group/textarea">
-                  <textarea 
-                    value={brandRules}
-                    onChange={(e) => setBrandRules(e.target.value)}
-                    className={cn(
-                      "w-full h-56 bg-(--bg-input) border rounded-2xl p-5 pr-12 text-[11px] font-mono text-(--fg-muted) focus:ring-1 focus:ring-[#00AEEF]/50 outline-none resize-none leading-relaxed transition-all group-hover/textarea:border-(--border-hover)",
-                      brandRules !== savedBrandRules ? "border-yellow-500/20" : "border-(--border)"
-                    )}
-                  />
-                  <button
-                    onClick={() => setShowExpandedEditor(true)}
-                    className="absolute top-4 right-4 w-7 h-7 bg-(--bg-surface) border border-(--border) rounded-lg flex items-center justify-center text-(--fg-faint) hover:text-[#00AEEF] hover:border-[#00AEEF]/30 transition-all"
-                    title="Expand editor"
-                  >
-                    <Maximize2 className="w-3.5 h-3.5" />
-                  </button>
-                </div>
-
-                {/* Save Controls */}
-                <div className="space-y-3">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={saveLabel}
-                      onChange={(e) => setSaveLabel(e.target.value)}
-                      placeholder="Version label (optional)..."
-                      className="flex-1 bg-(--bg-input) border border-(--border) rounded-xl px-4 py-2.5 text-[10px] text-(--fg-muted) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
-                    />
-                    <button
-                      onClick={handleSavePrompt}
-                      disabled={isSaving}
-                      className={cn(
-                        "flex items-center gap-2 px-5 py-2.5 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95",
-                        saveSuccess
-                          ? "bg-green-500/20 text-green-400 border border-green-500/30"
-                          : "bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 hover:bg-[#00AEEF]/20"
-                      )}
-                    >
-                      {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> 
-                        : saveSuccess ? <Check className="w-3.5 h-3.5" />
-                        : <Save className="w-3.5 h-3.5" />}
-                      {saveSuccess ? 'Saved' : 'Save'}
-                    </button>
-                  </div>
-                  <textarea
-                    value={saveNotes}
-                    onChange={(e) => setSaveNotes(e.target.value)}
-                    placeholder="Notes about this change (optional)..."
-                    className="w-full h-16 bg-(--bg-input) border border-(--border) rounded-xl p-3 text-[10px] text-(--fg-label) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 resize-none transition-all"
-                  />
-                </div>
-              </div>
-            </div>
-          </section>
-
-          {/* Reference Images Section */}
-          <section className="space-y-8">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3 text-(--fg-label)">
-                <ImageIcon className="w-4 h-4" />
-                <h2 className="font-black uppercase tracking-[0.3em] text-[10px]">Reference Images</h2>
-              </div>
-              <div className="h-[1px] flex-1 bg-(--border) ml-4" />
-            </div>
-
-            <div className="bg-(--bg-card) rounded-[2.5rem] border border-(--border) p-6 md:p-10 space-y-6 shadow-(--shadow-card)">
-              <div className="flex items-center justify-between">
-                <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">
-                  Brand Defaults + Custom ({allRefUrls.length})
-                </label>
+        {/* Sidebar Content */}
+        <div className="flex-1 overflow-y-auto custom-scrollbar px-5 py-5 space-y-6">
+          {/* Brand Identity */}
+          <div className="space-y-3">
+            <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Brand Identity</label>
+            <div className="space-y-2">
+              {(Object.keys(BRANDS) as BrandKey[]).map((key) => (
                 <button
-                  onClick={() => setShowAddRef(!showAddRef)}
-                  className="text-[9px] font-black text-[#00AEEF] hover:text-[#0096ce] uppercase tracking-widest transition-colors flex items-center gap-1"
+                  key={key}
+                  onClick={() => {
+                    setSelectedBrand(key);
+                    setBrandRules(BRANDS[key].rules);
+                    setSavedBrandRules(BRANDS[key].rules);
+                  }}
+                  className={cn(
+                    "w-full flex items-center gap-3 px-4 py-3 rounded-xl border transition-all duration-200 active:scale-[0.98]",
+                    selectedBrand === key
+                      ? "border-[#00AEEF]/50 bg-[#00AEEF]/10 text-(--fg)"
+                      : "border-(--border) hover:border-(--border-hover) text-(--fg-label) hover:bg-(--bg-surface)"
+                  )}
                 >
-                  <Plus className="w-3 h-3" />
-                  Add
+                  <div className="w-7 h-7 rounded-lg shadow-sm flex items-center justify-center text-[11px] font-black text-white shrink-0" style={{ backgroundColor: BRANDS[key].color }}>
+                    {BRANDS[key].name[0]}
+                  </div>
+                  <span className="text-[10px] font-black uppercase tracking-widest">{BRANDS[key].name}</span>
+                  {selectedBrand === key && <Check className="w-4 h-4 text-[#00AEEF] ml-auto" />}
                 </button>
-              </div>
-
-              {showAddRef && (
-                <div className="flex gap-2">
-                  <input
-                    type="text"
-                    value={newRefUrl}
-                    onChange={(e) => setNewRefUrl(e.target.value)}
-                    placeholder="Paste image URL..."
-                    className="flex-1 bg-(--bg-input) border border-(--border) rounded-xl px-4 py-2.5 text-[10px] text-(--fg-muted) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
-                    onKeyDown={(e) => e.key === 'Enter' && handleAddRef()}
-                  />
-                  <button
-                    onClick={handleAddRef}
-                    className="px-4 py-2.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-xl text-[10px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all"
-                  >
-                    Add
-                  </button>
-                </div>
-              )}
-
-              <div className="grid grid-cols-3 gap-3">
-                {BRANDS[selectedBrand].defaultReferences.map((url, idx) => (
-                  <div key={`default-${idx}`} className="aspect-square rounded-xl border border-(--border) bg-(--bg-surface-subtle) relative group overflow-hidden">
-                    <img src={url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                    <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/70 rounded text-[7px] font-bold text-white uppercase">
-                      Default
-                    </div>
-                  </div>
-                ))}
-                {storedRefs.map((ref) => (
-                  <div key={ref.id} className="aspect-square rounded-xl border border-[#00AEEF]/20 bg-(--bg-surface-subtle) relative group overflow-hidden">
-                    <img src={ref.url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                    <button
-                      onClick={() => handleRemoveRef(ref.id)}
-                      className="absolute top-1.5 right-1.5 w-5 h-5 bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                    >
-                      <X className="w-3 h-3 text-white" />
-                    </button>
-                    <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-[#00AEEF]/20 rounded text-[7px] font-bold text-[#00AEEF] uppercase">
-                      Custom
-                    </div>
-                  </div>
-                ))}
-              </div>
+              ))}
             </div>
-          </section>
+          </div>
 
-          {/* Asset Configuration */}
-          <section className="space-y-8">
+          {/* Design Logic (compact preview) */}
+          <div className="space-y-3">
             <div className="flex items-center justify-between">
-              <div className="flex items-center gap-3 text-(--fg-label)">
-                <Layers className="w-4 h-4" />
-                <h2 className="font-black uppercase tracking-[0.3em] text-[10px]">Asset Specs</h2>
-              </div>
-              <div className="h-[1px] flex-1 bg-(--border) ml-4" />
+              <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Design Logic</label>
+              <button
+                onClick={() => setShowExpandedEditor(true)}
+                className="text-[9px] font-black text-[#00AEEF] hover:text-[#0096ce] uppercase tracking-widest transition-colors"
+              >
+                Editor
+              </button>
             </div>
-
-            <div className="bg-(--bg-card) rounded-[2.5rem] border border-(--border) p-6 md:p-10 space-y-8 shadow-(--shadow-card)">
-              <div className="grid grid-cols-2 gap-4">
-                {(['hero', 'feature', 'dimensions'] as AssetType[]).map((type) => (
-                  <button
-                    key={type}
-                    onClick={() => setAssetType(type)}
-                    className={cn(
-                      "p-4 rounded-2xl border transition-all duration-300 text-center space-y-2 active:scale-[0.98]",
-                      assetType === type 
-                        ? "border-[#00AEEF]/50 bg-[#00AEEF]/10 text-(--fg)" 
-                        : "border-(--border) hover:border-(--border-hover) text-(--fg-label) hover:bg-(--bg-surface)"
-                    )}
-                  >
-                    <p className="text-[10px] font-black uppercase tracking-widest">{type}</p>
-                  </button>
+            <button
+              onClick={() => setShowExpandedEditor(true)}
+              className="w-full bg-(--bg-input) border border-(--border) rounded-xl p-3 text-left hover:border-(--border-hover) transition-all cursor-pointer relative group"
+            >
+              <div className="font-mono text-[9px] text-(--fg-faint) leading-relaxed overflow-hidden max-h-[4.5rem]">
+                {brandRules.split('\n').slice(0, 4).map((line, i) => (
+                  <div key={i} className="flex gap-2">
+                    <span className="text-(--fg-dim) select-none w-4 text-right shrink-0">{i + 1}</span>
+                    <span className="truncate">{line || '\u00A0'}</span>
+                  </div>
                 ))}
               </div>
-
-              <div className="space-y-4">
-                <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Output Resolution</label>
-                <div className="flex gap-2">
-                  {(['1K', '2K', '4K'] as const).map((size) => (
-                    <button
-                      key={size}
-                      onClick={() => setImageSize(size)}
-                      className={cn(
-                        "flex-1 py-3 rounded-xl border text-[10px] font-black uppercase tracking-widest transition-all",
-                        imageSize === size 
-                          ? "border-[#00AEEF]/50 bg-[#00AEEF]/10 text-(--fg)" 
-                          : "border-(--border) hover:border-(--border-hover) text-(--fg-label)"
-                      )}
-                    >
-                      {size}
-                    </button>
-                  ))}
-                </div>
-              </div>
-            </div>
-          </section>
+              {brandRules !== savedBrandRules && (
+                <div className="absolute top-2 right-2 w-2 h-2 rounded-full bg-yellow-400 animate-pulse" />
+              )}
+            </button>
+          </div>
         </div>
 
-        {/* Right Column: Studio Canvas */}
-        <div className="lg:col-span-8 space-y-12">
-          {/* Data Extraction Bar */}
-          <div className="bg-(--bg-card) rounded-[2rem] border border-(--border) p-2 sm:p-3 flex flex-col sm:flex-row items-stretch sm:items-center gap-3 shadow-(--shadow-card)">
+        {/* Sidebar Footer */}
+        <div className="px-5 py-4 border-t border-(--border) space-y-3 shrink-0">
+          <button
+            onClick={handleSavePrompt}
+            disabled={isSaving}
+            className={cn(
+              "w-full flex items-center justify-center gap-2 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all active:scale-95",
+              saveSuccess
+                ? "bg-green-500/20 text-green-400 border border-green-500/30"
+                : "bg-[#00AEEF] hover:bg-[#0096ce] text-white shadow-(--shadow-cta)"
+            )}
+          >
+            {isSaving ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : saveSuccess ? <Check className="w-3.5 h-3.5" /> : <Save className="w-3.5 h-3.5" />}
+            {saveSuccess ? 'Saved' : 'Save'}
+          </button>
+          <button
+            onClick={() => { setShowHistory(true); loadHistory(selectedBrand); }}
+            className="w-full flex items-center justify-center gap-2 py-2 text-[9px] font-black text-(--fg-label) hover:text-[#00AEEF] uppercase tracking-widest transition-colors"
+          >
+            <History className="w-3.5 h-3.5" />
+            Version History
+          </button>
+        </div>
+      </aside>
+
+      {/* Main Content */}
+      <div className="flex-1 flex flex-col h-screen overflow-hidden">
+        {/* URL Extract Bar */}
+        <div className="shrink-0 px-4 pt-4 pb-2">
+          <div className="bg-(--bg-card) rounded-2xl border border-(--border) p-2 flex items-center gap-2 shadow-(--shadow-card)">
             <div className="flex-1 relative group">
-              <Search className="absolute left-5 top-1/2 -translate-y-1/2 w-4 h-4 text-(--fg-faint) group-focus-within:text-[#00AEEF] transition-colors" />
-              <input 
-                type="text" 
+              <Search className="absolute left-4 top-1/2 -translate-y-1/2 w-4 h-4 text-(--fg-faint) group-focus-within:text-[#00AEEF] transition-colors" />
+              <input
+                type="text"
                 value={scrapeUrl}
                 onChange={(e) => setScrapeUrl(e.target.value)}
                 placeholder="Paste WebstaurantStore URL..."
-                className="w-full bg-(--bg-input) border border-(--border) rounded-2xl pl-14 pr-6 py-4 text-xs text-(--fg) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
+                className="w-full bg-(--bg-input) border border-(--border) rounded-xl pl-11 pr-4 py-3 text-xs text-(--fg) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
                 onKeyDown={(e) => e.key === 'Enter' && handleScrape()}
               />
             </div>
-            <button 
+            <button
               onClick={handleScrape}
               disabled={isScraping || !scrapeUrl}
-              className="bg-[#00AEEF] hover:bg-[#0096ce] disabled:opacity-50 disabled:cursor-not-allowed text-white px-8 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 active:scale-95"
+              className="bg-[#00AEEF] hover:bg-[#0096ce] disabled:opacity-50 disabled:cursor-not-allowed text-white px-6 py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95"
             >
               {isScraping ? <Loader2 className="w-4 h-4 animate-spin" /> : <Globe className="w-4 h-4" />}
               Extract
             </button>
           </div>
+          {!hasApiKey && (
+            <button onClick={openKeyDialog} className="mt-2 flex items-center gap-2 px-4 py-2 bg-[#00AEEF]/10 text-[#00AEEF] rounded-lg text-[9px] font-black uppercase tracking-widest border border-[#00AEEF]/20 hover:bg-[#00AEEF]/20 transition-all">
+              <Key className="w-3.5 h-3.5" />
+              Connect API Key
+            </button>
+          )}
+        </div>
 
-          {/* Scraped Product Data Display */}
-          {scrapedData && (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="bg-(--bg-card) rounded-[2rem] border border-(--border) p-6 md:p-8 space-y-5 shadow-(--shadow-card)"
-            >
-              <div className="flex items-center gap-3 text-(--fg-label) mb-2">
-                <Info className="w-4 h-4" />
-                <h2 className="font-black uppercase tracking-[0.3em] text-[10px]">Extracted Product</h2>
+        {/* Error Display */}
+        {error && (
+          <div className="shrink-0 px-4 pb-2">
+            <div className="bg-red-500/5 border border-red-500/20 rounded-xl p-3 flex items-start gap-3">
+              <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
+              <p className="text-[11px] text-red-400 flex-1">{error}</p>
+              <button onClick={() => setError(null)} className="shrink-0"><X className="w-3.5 h-3.5 text-red-400/50 hover:text-red-400" /></button>
+            </div>
+          </div>
+        )}
+
+        {/* Middle: Source Assets + Canvas */}
+        <div className="flex-1 flex gap-4 px-4 py-2 overflow-hidden min-h-0">
+          {/* Source Assets Panel */}
+          <div className="w-[340px] shrink-0 bg-(--bg-card) border border-(--border) rounded-2xl flex flex-col overflow-hidden">
+            <div className="px-5 py-3 border-b border-(--border) flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-2 text-(--fg-label)">
+                <Upload className="w-4 h-4" />
+                <h2 className="font-black uppercase tracking-[0.2em] text-[10px]">Source Assets</h2>
+              </div>
+            </div>
+            <div className="flex-1 overflow-y-auto custom-scrollbar p-4 space-y-4">
+              {/* Product Image */}
+              <div>
+                <label className="text-[8px] font-black text-(--fg-faint) uppercase tracking-[0.2em] mb-2 block">Product Image</label>
+                <div {...getProdRootProps()} className={cn(
+                  "aspect-[4/3] rounded-xl border-2 border-dashed flex flex-col items-center justify-center gap-2 transition-all cursor-pointer group relative overflow-hidden",
+                  isProdDragActive ? "border-[#00AEEF] bg-[#00AEEF]/5" : "border-(--border) hover:border-(--border-hover) bg-(--bg-surface-subtle)"
+                )}>
+                  <input {...getProdInputProps()} />
+                  {productImg.preview ? (
+                    <div className="w-full h-full relative">
+                      <img src={productImg.preview} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                      <button onClick={(e) => { e.stopPropagation(); setProductImg({ file: null, preview: null }); }} className="absolute top-2 right-2 w-6 h-6 bg-black/80 rounded-full flex items-center justify-center hover:bg-black transition-colors">
+                        <X className="w-3 h-3 text-white" />
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <Upload className="w-5 h-5 text-(--fg-dim)" />
+                      <p className="text-[8px] font-black text-(--fg-dim) uppercase tracking-widest">Upload slote</p>
+                    </>
+                  )}
+                </div>
               </div>
 
-              <div className="flex items-baseline gap-4 flex-wrap">
-                <h3 className="text-sm font-bold text-(--fg) leading-tight">{scrapedData.title}</h3>
-                {scrapedData.price && (
-                  <span className="text-sm font-black text-[#00AEEF]">{scrapedData.price}</span>
-                )}
-              </div>
-
-              <div className="flex flex-wrap items-center gap-x-4 gap-y-1 text-[10px] text-(--fg-label)">
-                {scrapedData.brand && <span>Brand: {scrapedData.brand}</span>}
-                {scrapedData.itemNumber && <span>Item #: {scrapedData.itemNumber}</span>}
-                {scrapedData.mfrNumber && <span>MFR #: {scrapedData.mfrNumber}</span>}
-                {scrapedData.upc && <span>UPC: {scrapedData.upc}</span>}
-              </div>
-
-              {scrapedData.description && scrapedData.description !== "No description available." && (
-                <p className="text-[11px] text-(--fg-label) leading-relaxed line-clamp-3">{scrapedData.description}</p>
-              )}
-
-              {/* Detected Flags */}
-              {detectFlags(scrapedData).length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {detectFlags(scrapedData).map((flag, idx) => (
-                    <span key={idx} className="px-2.5 py-1 bg-[#00AEEF]/10 border border-[#00AEEF]/20 rounded-lg text-[9px] font-black text-[#00AEEF] uppercase tracking-wider">
-                      {flag}
-                    </span>
-                  ))}
+              {/* Extracted Gallery */}
+              {scrapedData && scrapedData.galleryImages.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-(--border)">
+                  <div className="flex items-center justify-between">
+                    <label className="text-[8px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Gallery</label>
+                    <span className="text-[8px] font-bold text-(--fg-dim)">{scrapedData.galleryImages.length}</span>
+                  </div>
+                  <div className="grid grid-cols-4 gap-1.5 max-h-28 overflow-y-auto custom-scrollbar">
+                    {scrapedData.galleryImages.map((url, idx) => (
+                      <button key={idx} onClick={() => selectScrapedImage(url)} className={cn("aspect-square rounded-lg border overflow-hidden transition-all relative", productImg.preview === url ? "border-[#00AEEF] ring-2 ring-[#00AEEF]/10" : "border-(--border) hover:border-(--border-hover)")}>
+                        <img src={url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                        {productImg.preview === url && <div className="absolute inset-0 bg-[#00AEEF]/20 flex items-center justify-center"><CheckCircle2 className="w-3 h-3 text-white" /></div>}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               )}
 
-              {/* Feature Details */}
-              {scrapedData.featureDetails && Object.keys(scrapedData.featureDetails).length > 0 && (
-                <div>
-                  <button
-                    onClick={() => setShowFeatureDetails(!showFeatureDetails)}
-                    className="flex items-center gap-2 text-[10px] font-black text-(--fg-label) uppercase tracking-widest hover:text-(--fg-secondary) transition-colors"
-                  >
-                    {showFeatureDetails ? <ChevronUp className="w-3 h-3" /> : <ChevronDown className="w-3 h-3" />}
-                    Feature Details ({Object.keys(scrapedData.featureDetails).length})
-                  </button>
-                  {showFeatureDetails && (
-                    <div className="mt-3 space-y-2.5 pl-2 border-l border-(--border)">
-                      {Object.entries(scrapedData.featureDetails).map(([heading, body]) => (
-                        <div key={heading} className="text-[10px]">
-                          <span className="font-bold text-(--fg-muted)">{heading}:</span>{' '}
-                          <span className="text-(--fg-faint)">{body}</span>
-                        </div>
+              {/* Scraped Data Summary */}
+              {scrapedData && (
+                <div className="space-y-2 pt-2 border-t border-(--border)">
+                  <label className="text-[8px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Product Info</label>
+                  <p className="text-[10px] text-(--fg-label) leading-snug line-clamp-2">{scrapedData.title}</p>
+                  {detectFlags(scrapedData).length > 0 && (
+                    <div className="flex flex-wrap gap-1">
+                      {detectFlags(scrapedData).map((flag, idx) => (
+                        <span key={idx} className="px-1.5 py-0.5 bg-[#00AEEF]/10 border border-[#00AEEF]/20 rounded text-[7px] font-black text-[#00AEEF] uppercase">{flag}</span>
                       ))}
                     </div>
                   )}
                 </div>
               )}
 
-              {/* Specs Pills */}
-              {Object.keys(scrapedData.specs).length > 0 && (
-                <div className="flex flex-wrap gap-2">
-                  {Object.entries(scrapedData.specs).slice(0, showAllSpecs ? undefined : 8).map(([key, val]) => (
-                    <span key={key} className="inline-flex items-center rounded-lg bg-(--bg-surface) border border-(--border) px-2.5 py-1 text-[10px] text-(--fg-muted)">
-                      <span className="font-bold text-(--fg-secondary)">{key}:</span>&nbsp;{val}
-                    </span>
-                  ))}
-                  {Object.keys(scrapedData.specs).length > 8 && !showAllSpecs && (
-                    <button
-                      onClick={() => setShowAllSpecs(true)}
-                      className="inline-flex items-center rounded-lg bg-(--bg-surface) border border-(--border) px-2.5 py-1 text-[10px] text-(--fg-faint) hover:text-(--fg-muted) transition-colors"
-                    >
-                      +{Object.keys(scrapedData.specs).length - 8} more
+              {/* Reference Images */}
+              <div className="space-y-2 pt-2 border-t border-(--border)">
+                <div className="flex items-center justify-between">
+                  <label className="text-[8px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Reference Images ({allRefUrls.length + referenceImgs.length})</label>
+                  <button
+                    onClick={() => setShowAddRef(!showAddRef)}
+                    className="text-[8px] font-black text-[#00AEEF] hover:text-[#0096ce] uppercase tracking-widest transition-colors"
+                  >
+                    + URL
+                  </button>
+                </div>
+
+                {showAddRef && (
+                  <div className="flex gap-1.5">
+                    <input
+                      type="text"
+                      value={newRefUrl}
+                      onChange={(e) => setNewRefUrl(e.target.value)}
+                      placeholder="Paste image URL..."
+                      className="flex-1 bg-(--bg-input) border border-(--border) rounded-lg px-3 py-2 text-[9px] text-(--fg-muted) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
+                      onKeyDown={(e) => e.key === 'Enter' && handleAddRef()}
+                    />
+                    <button onClick={handleAddRef} className="px-3 py-2 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase hover:bg-[#00AEEF]/20 transition-all">
+                      Add
                     </button>
-                  )}
-                </div>
-              )}
-            </motion.div>
-          )}
-
-          {/* Error Display */}
-          {error && (
-            <motion.div
-              initial={{ opacity: 0 }}
-              animate={{ opacity: 1 }}
-              className="bg-red-500/5 border border-red-500/20 rounded-2xl p-4 flex items-start gap-3"
-            >
-              <AlertCircle className="w-4 h-4 text-red-400 mt-0.5 shrink-0" />
-              <p className="text-[11px] text-red-400">{error}</p>
-              <button onClick={() => setError(null)} className="ml-auto shrink-0">
-                <X className="w-3.5 h-3.5 text-red-400/50 hover:text-red-400" />
-              </button>
-            </motion.div>
-          )}
-
-          {/* Main Studio Area */}
-          <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
-            {/* Input Stack */}
-            <div className="lg:col-span-5 xl:col-span-4 space-y-8">
-              <div className="space-y-6">
-                <div className="flex items-center gap-3 text-(--fg-label)">
-                  <Upload className="w-4 h-4" />
-                  <h2 className="font-black uppercase tracking-[0.3em] text-[10px]">Source Assets</h2>
-                </div>
-                
-                <div className="space-y-4">
-                  {/* Product Upload */}
-                  <div {...getProdRootProps()} className={cn(
-                    "aspect-square rounded-[2rem] border-2 border-dashed flex flex-col items-center justify-center gap-4 transition-all cursor-pointer group relative overflow-hidden",
-                    isProdDragActive ? "border-[#00AEEF] bg-[#00AEEF]/5" : "border-(--border) hover:border-(--border-hover) bg-(--bg-surface-subtle)"
-                  )}>
-                    <input {...getProdInputProps()} />
-                    {productImg.preview ? (
-                      <div className="w-full h-full relative">
-                        <img src={productImg.preview} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
-                        <button 
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            setProductImg({ file: null, preview: null });
-                          }}
-                          className="absolute top-4 right-4 w-8 h-8 bg-black/80 rounded-full flex items-center justify-center hover:bg-black transition-colors"
-                        >
-                          <X className="w-4 h-4 text-white" />
-                        </button>
-                      </div>
-                    ) : (
-                      <>
-                        <div className="w-12 h-12 rounded-2xl bg-(--bg-surface) flex items-center justify-center group-hover:scale-110 transition-transform">
-                          <Plus className="w-6 h-6 text-(--fg-faint)" />
-                        </div>
-                        <p className="text-[9px] font-black text-(--fg-faint) uppercase tracking-widest">Product Image</p>
-                      </>
-                    )}
                   </div>
+                )}
 
-                  {/* Extracted Gallery */}
-                  {scrapedData && scrapedData.galleryImages.length > 0 && (
-                    <div className="space-y-4 pt-4 border-t border-(--border)">
-                      <div className="flex items-center justify-between">
-                        <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Extracted Gallery</label>
-                        <span className="text-[8px] font-bold text-(--fg-dim) uppercase">{scrapedData.galleryImages.length} Assets</span>
-                      </div>
-                      <div className="grid grid-cols-3 sm:grid-cols-4 gap-2 max-h-48 overflow-y-auto pr-2 custom-scrollbar">
-                        {scrapedData.galleryImages.map((url, idx) => (
-                          <button
-                            key={idx}
-                            onClick={() => selectScrapedImage(url)}
-                            className={cn(
-                              "aspect-square rounded-xl border-2 overflow-hidden transition-all relative group",
-                              productImg.preview === url 
-                                ? "border-[#00AEEF] ring-4 ring-[#00AEEF]/10" 
-                                : "border-(--border) hover:border-(--border-hover) bg-(--bg-surface-subtle)"
-                            )}
-                          >
-                            <img src={url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                            {productImg.preview === url && (
-                              <div className="absolute inset-0 bg-[#00AEEF]/20 flex items-center justify-center">
-                                <CheckCircle2 className="w-4 h-4 text-white" />
-                              </div>
-                            )}
-                          </button>
-                        ))}
-                      </div>
+                {/* Brand default + stored refs grid */}
+                <div className="grid grid-cols-3 gap-1.5">
+                  {BRANDS[selectedBrand].defaultReferences.map((url, idx) => (
+                    <div key={`default-${idx}`} className="aspect-square rounded-lg border border-(--border) bg-(--bg-surface-subtle) relative group overflow-hidden">
+                      <img src={url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      <div className="absolute bottom-0.5 left-0.5 px-1 py-0.5 bg-black/70 rounded text-[6px] font-bold text-white uppercase">Default</div>
+                    </div>
+                  ))}
+                  {storedRefs.map((ref) => (
+                    <div key={ref.id} className="aspect-square rounded-lg border border-[#00AEEF]/20 bg-(--bg-surface-subtle) relative group overflow-hidden">
+                      <img src={ref.url} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      <button
+                        onClick={() => handleRemoveRef(ref.id)}
+                        className="absolute top-1 right-1 w-4 h-4 bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
+                      >
+                        <X className="w-2.5 h-2.5 text-white" />
+                      </button>
+                      <div className="absolute bottom-0.5 left-0.5 px-1 py-0.5 bg-[#00AEEF]/20 rounded text-[6px] font-bold text-[#00AEEF] uppercase">Custom</div>
+                    </div>
+                  ))}
+                </div>
+
+                {/* Local file uploads */}
+                <div className="space-y-2">
+                  {referenceImgs.map((img, idx) => (
+                    <div key={idx} className="aspect-[4/3] rounded-xl border border-(--border) bg-(--bg-surface-subtle) relative group overflow-hidden">
+                      <img src={img.preview} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
+                      <button onClick={() => removeReferenceImg(idx)} className="absolute top-2 right-2 w-5 h-5 bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
+                        <X className="w-3 h-3 text-white" />
+                      </button>
+                      <div className="absolute bottom-1 left-1 px-1.5 py-0.5 bg-black/70 rounded text-[7px] font-bold text-white uppercase">Upload {idx + 1}</div>
+                    </div>
+                  ))}
+                  {referenceImgs.length < 4 && (
+                    <div {...getRefRootProps()} className="aspect-[4/3] rounded-xl border-2 border-dashed border-(--border) hover:border-(--border-hover) bg-(--bg-surface-subtle) flex flex-col items-center justify-center gap-1.5 cursor-pointer transition-all">
+                      <input {...getRefInputProps()} />
+                      <Upload className="w-4 h-4 text-(--fg-dim)" />
+                      <p className="text-[8px] font-black text-(--fg-dim) uppercase tracking-widest">Upload Ref</p>
                     </div>
                   )}
-
-                  {/* Reference Uploads */}
-                  <div className="grid grid-cols-2 gap-4">
-                    {referenceImgs.map((img, idx) => (
-                      <div key={idx} className="aspect-square rounded-2xl border border-(--border) bg-(--bg-surface-subtle) relative group overflow-hidden">
-                        <img src={img.preview} className="w-full h-full object-cover" referrerPolicy="no-referrer" />
-                        <button 
-                          onClick={() => removeReferenceImg(idx)}
-                          className="absolute top-2 right-2 w-6 h-6 bg-black/80 rounded-full flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity"
-                        >
-                          <X className="w-3 h-3 text-white" />
-                        </button>
-                      </div>
-                    ))}
-                    {referenceImgs.length < 4 && (
-                      <div {...getRefRootProps()} className="aspect-square rounded-2xl border-2 border-dashed border-(--border) hover:border-(--border-hover) bg-(--bg-surface-subtle) flex flex-col items-center justify-center gap-2 cursor-pointer transition-all">
-                        <input {...getRefInputProps()} />
-                        <ImageIcon className="w-5 h-5 text-(--fg-dim)" />
-                        <p className="text-[8px] font-black text-(--fg-dim) uppercase tracking-widest">Ref {referenceImgs.length + 1}</p>
-                      </div>
-                    )}
-                  </div>
                 </div>
               </div>
 
-              <div className="space-y-4">
-                <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em] flex items-center gap-2">
-                  <Sparkles className="w-3.5 h-3.5" />
-                  AI Prompting
+              {/* AI Prompt */}
+              <div className="space-y-2 pt-2 border-t border-(--border)">
+                <label className="text-[8px] font-black text-(--fg-faint) uppercase tracking-[0.2em] flex items-center gap-1.5">
+                  <Sparkles className="w-3 h-3" />
+                  AI Prompt
                 </label>
-                <textarea 
+                <textarea
                   value={prompt}
                   onChange={(e) => setPrompt(e.target.value)}
-                  className="w-full h-40 bg-(--bg-input) border border-(--border) rounded-2xl p-5 text-[11px] text-(--fg-muted) focus:ring-1 focus:ring-[#00AEEF]/50 outline-none resize-none leading-relaxed transition-all"
+                  className="w-full h-24 bg-(--bg-input) border border-(--border) rounded-xl p-3 text-[10px] text-(--fg-muted) focus:ring-1 focus:ring-[#00AEEF]/50 outline-none resize-none leading-relaxed transition-all"
                   placeholder="Describe the marketing angle..."
                 />
-                <button 
+                <button
                   onClick={handleGenerate}
-                  disabled={isGenerating || !productImg.file}
-                  className="w-full bg-[#00AEEF] hover:bg-[#0096ce] disabled:opacity-50 disabled:cursor-not-allowed text-white py-5 rounded-[2rem] text-[11px] font-black uppercase tracking-[0.3em] transition-all flex items-center justify-center gap-4 shadow-(--shadow-cta) active:scale-95"
+                  disabled={isGenerating || !productImg.file || selectedAssetTypes.size === 0}
+                  className="w-full bg-[#00AEEF] hover:bg-[#0096ce] disabled:opacity-50 disabled:cursor-not-allowed text-white py-3 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-2 shadow-(--shadow-cta) active:scale-95"
                 >
-                  {isGenerating ? <Loader2 className="w-5 h-5 animate-spin" /> : <Play className="w-5 h-5" />}
-                  Generate Studio Asset
+                  {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
+                  Generate {selectedAssetTypes.size > 1 ? `(${selectedAssetTypes.size})` : ''}
                 </button>
               </div>
             </div>
+          </div>
 
-            {/* Canvas Preview Area */}
-            <div className="lg:col-span-7 xl:col-span-8 space-y-8">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-3 text-[#00AEEF]">
+          {/* Studio Canvas Panel */}
+          <div className="flex-1 bg-(--bg-card) border border-(--border) rounded-2xl flex flex-col overflow-hidden min-w-0">
+            <div className="px-5 py-3 border-b border-(--border) flex items-center justify-between shrink-0">
+              <div className="flex items-center gap-4">
+                <div className="flex items-center gap-2 text-[#00AEEF]">
                   <Maximize2 className="w-4 h-4" />
-                  <h2 className="font-black uppercase tracking-[0.3em] text-[10px]">Studio Canvas</h2>
+                  <h2 className="font-black uppercase tracking-[0.2em] text-[10px]">Studio Canvas</h2>
                 </div>
-                {resultImage && (
-                  <a 
-                    href={resultImage} 
-                    download="brandengine-asset.png"
-                    className="flex items-center gap-3 text-[10px] font-black text-[#00AEEF] hover:text-[#0096ce] uppercase tracking-[0.2em] transition-colors"
-                  >
-                    <Download className="w-4 h-4" />
-                    Export {imageSize}
-                  </a>
+                {/* Result Tabs */}
+                {hasAnyResult && selectedAssetTypes.size > 1 && (
+                  <div className="flex items-center gap-1 ml-2">
+                    {Array.from(selectedAssetTypes).map(type => (
+                      <button
+                        key={type}
+                        onClick={() => setActiveResultTab(type)}
+                        className={cn(
+                          "px-3 py-1 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all border",
+                          activeResultTab === type
+                            ? "bg-[#00AEEF]/10 text-[#00AEEF] border-[#00AEEF]/30"
+                            : "text-(--fg-faint) border-transparent hover:text-(--fg-label)"
+                        )}
+                      >
+                        {type}
+                        {resultImages[type] && <span className="ml-1 w-1.5 h-1.5 rounded-full bg-green-400 inline-block" />}
+                      </button>
+                    ))}
+                  </div>
                 )}
               </div>
-
-              <div className="relative aspect-square bg-(--bg-canvas) rounded-[3.5rem] border border-(--border) shadow-(--shadow-canvas) overflow-hidden flex items-center justify-center group">
-                <AnimatePresence mode="wait">
-                  {isGenerating ? (
-                    <motion.div 
-                      key="loading"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      exit={{ opacity: 0 }}
-                      className="flex flex-col items-center gap-8 p-12 text-center relative z-10"
-                    >
-                      <div className="relative">
-                        <div className="w-24 h-24 border-2 border-[#00AEEF]/10 border-t-[#00AEEF] rounded-full animate-spin" />
-                        <Sparkles className="w-10 h-10 text-[#00AEEF] absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-pulse" />
-                      </div>
-                      <div className="space-y-3">
-                        <h3 className="text-sm font-black uppercase tracking-[0.3em] text-(--fg)">Rendering Asset</h3>
-                        <p className="text-[10px] text-(--fg-faint) font-black uppercase tracking-widest leading-relaxed max-w-[240px]">Applying brand logic &bull; Matching lighting &bull; {imageSize} Output</p>
-                      </div>
-                    </motion.div>
-                  ) : resultImage ? (
-                    <motion.div 
-                      key="result"
-                      initial={{ opacity: 0, scale: 0.98 }}
-                      animate={{ opacity: 1, scale: 1 }}
-                      className="w-full h-full relative z-10 p-12"
-                    >
-                      <div className="w-full h-full rounded-3xl overflow-hidden shadow-(--shadow-card) border border-(--border)">
-                        <img src={resultImage} alt="Generated Asset" className="w-full h-full object-contain" referrerPolicy="no-referrer" />
-                      </div>
-                    </motion.div>
-                  ) : (
-                    <motion.div 
-                      key="empty"
-                      initial={{ opacity: 0 }}
-                      animate={{ opacity: 1 }}
-                      className="flex flex-col items-center gap-8 text-(--fg-ghost) p-12 text-center relative z-10"
-                    >
-                      <div className="w-32 h-32 rounded-[2.5rem] bg-(--bg-surface-subtle) flex items-center justify-center border border-(--border) group-hover:scale-105 transition-transform duration-500">
-                        <ImageIcon className="w-12 h-12 opacity-10" />
-                      </div>
-                      <div className="space-y-3">
-                        <p className="text-[11px] font-black text-(--fg-faint) uppercase tracking-[0.3em]">Awaiting Generation</p>
-                        <p className="text-[10px] font-black text-(--fg-dim) uppercase tracking-widest max-w-[240px] leading-relaxed">Configure brand rules and provide inputs to begin studio rendering</p>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-              </div>
-
-              {resultImage && !isGenerating && (
-                <motion.div 
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  className="bg-(--bg-card) border border-(--border) rounded-[2.5rem] p-8 space-y-6 shadow-(--shadow-card)"
-                >
-                  <div className="flex items-center gap-3 text-[#00AEEF]">
-                    <Sparkles className="w-4 h-4" />
-                    <h3 className="text-[10px] font-black uppercase tracking-[0.3em]">Refine Generation</h3>
-                  </div>
-                  <div className="flex flex-col sm:flex-row gap-4">
-                    <div className="flex-1 relative group">
-                      <input 
-                        type="text"
-                        value={refinementPrompt}
-                        onChange={(e) => setRefinementPrompt(e.target.value)}
-                        placeholder="e.g. 'Make the text larger'..."
-                        className="w-full bg-(--bg-input) border border-(--border) rounded-2xl px-6 py-4 text-xs text-(--fg) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
-                        onKeyDown={(e) => e.key === 'Enter' && handleRefine()}
-                      />
-                    </div>
-                    <button 
-                      onClick={handleRefine}
-                      disabled={!refinementPrompt.trim() || isGenerating}
-                      className="bg-[#00AEEF] hover:bg-[#0096ce] disabled:opacity-50 disabled:cursor-not-allowed text-white px-10 py-4 rounded-2xl text-[10px] font-black uppercase tracking-widest transition-all flex items-center justify-center gap-3 active:scale-95 shadow-sm"
-                    >
-                      {isGenerating ? <Loader2 className="w-4 h-4 animate-spin" /> : <Play className="w-4 h-4" />}
-                      Refine
-                    </button>
-                  </div>
-                </motion.div>
+              {currentResultImage && (
+                <a href={currentResultImage} download={`brandengine-${activeResultTab}.png`} className="flex items-center gap-2 text-[9px] font-black text-[#00AEEF] hover:text-[#0096ce] uppercase tracking-widest transition-colors">
+                  <Download className="w-3.5 h-3.5" />
+                  Export
+                </a>
               )}
             </div>
-          </div>
-        </div>
-      </main>
-
-      {/* Footer Bar */}
-      <footer className="bg-(--footer-bg) border-t border-(--border) py-12 sm:py-16 mt-12 sm:mt-24">
-        <div className="max-w-[1600px] mx-auto px-6 sm:px-12 flex flex-col md:flex-row items-center justify-between gap-12 text-(--fg-dim)">
-          <div className="flex items-center gap-5">
-            <div className="w-10 h-10 bg-(--bg-surface) rounded-xl flex items-center justify-center border border-(--border)">
-              <Sparkles className="w-5 h-5 text-(--fg-faint)" />
+            <div className="flex-1 flex items-center justify-center p-6 overflow-hidden">
+              <AnimatePresence mode="wait">
+                {isGenerating ? (
+                  <motion.div key="loading" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} className="flex flex-col items-center gap-6 text-center">
+                    <div className="relative">
+                      <div className="w-20 h-20 border-2 border-[#00AEEF]/10 border-t-[#00AEEF] rounded-full animate-spin" />
+                      <Sparkles className="w-8 h-8 text-[#00AEEF] absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 animate-pulse" />
+                    </div>
+                    <div className="space-y-2">
+                      <h3 className="text-xs font-black uppercase tracking-[0.3em] text-(--fg)">Rendering</h3>
+                      <p className="text-[9px] text-(--fg-faint) font-black uppercase tracking-widest">{imageSize} Output</p>
+                    </div>
+                  </motion.div>
+                ) : currentResultImage ? (
+                  <motion.div key={`result-${activeResultTab}`} initial={{ opacity: 0, scale: 0.98 }} animate={{ opacity: 1, scale: 1 }} className="w-full h-full flex items-center justify-center">
+                    <div className="max-w-full max-h-full aspect-square rounded-2xl overflow-hidden shadow-(--shadow-card) border border-(--border)">
+                      <img src={currentResultImage} alt={`Generated ${activeResultTab}`} className="w-full h-full object-contain" referrerPolicy="no-referrer" />
+                    </div>
+                  </motion.div>
+                ) : (
+                  <motion.div key="empty" initial={{ opacity: 0 }} animate={{ opacity: 1 }} className="flex flex-col items-center gap-5 text-(--fg-ghost) text-center">
+                    <div className="w-20 h-20 rounded-2xl bg-(--bg-surface-subtle) flex items-center justify-center border border-(--border)">
+                      <ImageIcon className="w-8 h-8 opacity-10" />
+                    </div>
+                    <p className="text-[10px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Awaiting Generation...</p>
+                  </motion.div>
+                )}
+              </AnimatePresence>
             </div>
-            <div>
-              <p className="text-[10px] font-black uppercase tracking-[0.3em] text-(--fg-label)">AIIM Bot Studio</p>
-              <p className="text-[9px] font-bold uppercase tracking-[0.2em] text-(--fg-dim)">&copy; 2026 Professional v1.3</p>
-            </div>
-          </div>
-          
-          <div className="flex flex-wrap items-center justify-center gap-6 sm:gap-12">
-            {scrapedData ? (
-              detectFlags(scrapedData).map((flag, idx) => (
-                <span key={idx} className="text-[10px] font-black uppercase tracking-[0.3em] hover:text-(--fg-label) transition-colors cursor-default">
-                  {flag}
-                </span>
-              ))
-            ) : (
-              <>
-                <span className="text-[10px] font-black uppercase tracking-[0.3em] hover:text-(--fg-label) transition-colors cursor-default">Durable Stoneware</span>
-                <span className="text-[10px] font-black uppercase tracking-[0.3em] hover:text-(--fg-label) transition-colors cursor-default">Dishwasher Safe</span>
-                <span className="text-[10px] font-black uppercase tracking-[0.3em] hover:text-(--fg-label) transition-colors cursor-default">Microwave Safe</span>
-              </>
+            {/* Refinement */}
+            {currentResultImage && !isGenerating && (
+              <div className="shrink-0 px-5 py-3 border-t border-(--border) flex items-center gap-3">
+                <Sparkles className="w-4 h-4 text-[#00AEEF] shrink-0" />
+                <input
+                  type="text"
+                  value={refinementPrompt}
+                  onChange={(e) => setRefinementPrompt(e.target.value)}
+                  placeholder="Refine: e.g. 'Make the text larger'..."
+                  className="flex-1 bg-(--bg-input) border border-(--border) rounded-xl px-4 py-2.5 text-[10px] text-(--fg) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 transition-all"
+                  onKeyDown={(e) => e.key === 'Enter' && handleRefine()}
+                />
+                <button
+                  onClick={handleRefine}
+                  disabled={!refinementPrompt.trim() || isGenerating}
+                  className="bg-[#00AEEF] hover:bg-[#0096ce] disabled:opacity-50 disabled:cursor-not-allowed text-white px-5 py-2.5 rounded-xl text-[9px] font-black uppercase tracking-widest transition-all flex items-center gap-2 active:scale-95"
+                >
+                  <Play className="w-3.5 h-3.5" />
+                  Refine
+                </button>
+              </div>
             )}
           </div>
         </div>
-      </footer>
+
+        {/* Bottom Bar: Asset Specs + Output Resolution */}
+        <div className="shrink-0 px-4 pb-4 pt-2 flex gap-4">
+          <div className="flex-1 bg-(--bg-card) border border-(--border) rounded-2xl px-6 py-3 flex items-center gap-6">
+            <div className="flex items-center gap-2 text-(--fg-label)">
+              <Layers className="w-4 h-4" />
+              <h3 className="font-black uppercase tracking-[0.2em] text-[10px]">Asset Specs</h3>
+            </div>
+            <div className="flex items-center gap-5">
+              {(['hero', 'feature', 'dimensions'] as AssetType[]).map((type) => (
+                <label key={type} className="flex items-center gap-2 cursor-pointer select-none">
+                  <span className="text-[10px] font-black uppercase tracking-widest text-(--fg-label)">{type}</span>
+                  <button
+                    onClick={() => toggleAssetType(type)}
+                    className={cn(
+                      "relative w-10 h-5 rounded-full transition-colors duration-200",
+                      selectedAssetTypes.has(type) ? "bg-[#00AEEF]" : "bg-(--bg-surface-hover)"
+                    )}
+                  >
+                    <div className={cn(
+                      "absolute top-0.5 w-4 h-4 rounded-full bg-white shadow transition-transform duration-200",
+                      selectedAssetTypes.has(type) ? "translate-x-5.5" : "translate-x-0.5"
+                    )} />
+                  </button>
+                </label>
+              ))}
+            </div>
+          </div>
+          <div className="bg-(--bg-card) border border-(--border) rounded-2xl px-6 py-3 flex items-center gap-4">
+            <h3 className="font-black uppercase tracking-[0.2em] text-[10px] text-(--fg-label)">Output Resolution</h3>
+            <div className="flex gap-1.5">
+              {(['1K', '2K', '4K'] as const).map((size) => (
+                <button
+                  key={size}
+                  onClick={() => setImageSize(size)}
+                  className={cn(
+                    "px-4 py-1.5 rounded-lg text-[10px] font-black uppercase tracking-widest transition-all border",
+                    imageSize === size
+                      ? "border-[#00AEEF]/50 bg-[#00AEEF]/10 text-(--fg)"
+                      : "border-(--border) hover:border-(--border-hover) text-(--fg-label)"
+                  )}
+                >
+                  {size}
+                </button>
+              ))}
+            </div>
+          </div>
+        </div>
+      </div>
 
       {/* Version History Modal */}
       <AnimatePresence>
@@ -1417,7 +1239,7 @@ export default function App() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-[110] flex items-center justify-center bg-(--modal-backdrop) backdrop-blur-sm p-4"
-            onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); }}
+            onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); setViewingVersion(null); }}
           >
             <motion.div
               initial={{ scale: 0.95, opacity: 0 }}
@@ -1428,26 +1250,134 @@ export default function App() {
             >
               <div className="flex items-center justify-between mb-6">
                 <div className="flex items-center gap-3">
+                  {(viewingVersion || showDiff) && (
+                    <button
+                      onClick={() => { setViewingVersion(null); setShowDiff(false); setDiffVersions([null, null]); setDetailNotesText(''); }}
+                      className="text-[9px] font-black text-[#00AEEF] uppercase tracking-widest hover:text-[#0096ce] transition-colors flex items-center gap-1 mr-1"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Back
+                    </button>
+                  )}
                   <History className="w-5 h-5 text-[#00AEEF]" />
-                  <h2 className="text-sm font-black uppercase tracking-[0.2em] text-(--fg)">Version History</h2>
+                  <h2 className="text-sm font-black uppercase tracking-[0.2em] text-(--fg)">
+                    {viewingVersion ? `Version #${viewingVersion.id}` : 'Version History'}
+                  </h2>
                 </div>
-                <button onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); }}>
+                <button onClick={() => { setShowHistory(false); setShowDiff(false); setDiffVersions([null, null]); setViewingVersion(null); }}>
                   <X className="w-5 h-5 text-(--fg-label) hover:text-(--fg) transition-colors" />
                 </button>
               </div>
 
-              {showDiff && diffVersions[0] && diffVersions[1] ? (
+              {/* Detail View */}
+              {viewingVersion ? (() => {
+                const isApplied = appliedVersionId === viewingVersion.id || (appliedVersionId === null && viewingVersion.content === savedBrandRules);
+                return (
+                  <div className="flex-1 overflow-y-auto space-y-5 custom-scrollbar">
+                    {/* Version header */}
+                    <div className="flex items-center justify-between gap-4">
+                      <div className="flex items-center gap-3 min-w-0">
+                        <button onClick={() => handleToggleStar(viewingVersion)} className="shrink-0">
+                          <Star className={cn("w-4 h-4 transition-colors", viewingVersion.starred ? "text-yellow-400 fill-yellow-400" : "text-(--fg-dim) hover:text-yellow-400")} />
+                        </button>
+                        {viewingVersion.label && (
+                          <span className="text-[10px] font-black text-[#00AEEF] uppercase">{viewingVersion.label}</span>
+                        )}
+                        <span className="text-[9px] text-(--fg-faint) font-mono">#{viewingVersion.id}</span>
+                        {isApplied && (
+                          <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded-md text-[8px] font-black text-green-400 uppercase tracking-widest">
+                            <Check className="w-2.5 h-2.5" />
+                            Active
+                          </span>
+                        )}
+                      </div>
+                      {isApplied ? (
+                        <span className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg text-[8px] font-black uppercase tracking-widest flex items-center gap-1 shrink-0">
+                          <Check className="w-3 h-3" />
+                          Applied
+                        </span>
+                      ) : (
+                        <button
+                          onClick={() => handleApplyVersion(viewingVersion)}
+                          className="px-4 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all shrink-0"
+                        >
+                          Apply
+                        </button>
+                      )}
+                    </div>
+
+                    {/* Metadata */}
+                    <div className="flex items-center gap-4 text-[9px] text-(--fg-dim)">
+                      <span>{new Date(viewingVersion.created_at + 'Z').toLocaleString()}</span>
+                      {viewingVersion.author && (
+                        <span className="flex items-center gap-1">
+                          <Users className="w-3 h-3" />
+                          {viewingVersion.author}
+                        </span>
+                      )}
+                    </div>
+
+                    {/* Full prompt content */}
+                    <div className="space-y-2">
+                      <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em]">Prompt Content</label>
+                      <div className="bg-(--bg-input) border border-(--border) rounded-xl p-5 font-mono text-[11px] text-(--fg-muted) leading-relaxed whitespace-pre-wrap max-h-[40vh] overflow-y-auto custom-scrollbar">
+                        {viewingVersion.content}
+                      </div>
+                    </div>
+
+                    {/* Comments section */}
+                    <div className="space-y-3 border-t border-(--border) pt-5">
+                      <label className="text-[9px] font-black text-(--fg-faint) uppercase tracking-[0.2em] flex items-center gap-2">
+                        <MessageSquare className="w-3.5 h-3.5" />
+                        Comments
+                      </label>
+
+                      {viewingVersion.notes && (
+                        <div className="bg-(--bg-surface) border border-(--border) rounded-xl p-4">
+                          <div className="flex items-center gap-2 mb-2 text-[9px] text-(--fg-dim)">
+                            {viewingVersion.author && (
+                              <span className="font-black text-(--fg-label)">{viewingVersion.author}</span>
+                            )}
+                            <span>{new Date(viewingVersion.created_at + 'Z').toLocaleString()}</span>
+                          </div>
+                          <p className="text-[10px] text-(--fg-muted) leading-relaxed">{viewingVersion.notes}</p>
+                        </div>
+                      )}
+
+                      <div className="space-y-2">
+                        <textarea
+                          value={detailNotesText}
+                          onChange={(e) => setDetailNotesText(e.target.value)}
+                          placeholder={viewingVersion.notes ? "Update comment..." : "Add a comment..."}
+                          className="w-full h-20 bg-(--bg-input) border border-(--border) rounded-xl p-3 text-[10px] text-(--fg-muted) placeholder:text-(--fg-dim) focus:outline-none focus:border-[#00AEEF]/30 resize-none transition-all"
+                        />
+                        <button
+                          onClick={() => {
+                            if (!detailNotesText.trim()) return;
+                            const newNotes = viewingVersion.notes
+                              ? `${viewingVersion.notes}\n\n${detailNotesText.trim()}`
+                              : detailNotesText.trim();
+                            handleUpdateNotes(viewingVersion.id, newNotes);
+                            setDetailNotesText('');
+                          }}
+                          disabled={!detailNotesText.trim()}
+                          className="px-4 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 disabled:opacity-40 disabled:cursor-not-allowed transition-all"
+                        >
+                          {viewingVersion.notes ? 'Add Comment' : 'Save Comment'}
+                        </button>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()
+
+              /* Diff View */
+              : showDiff && diffVersions[0] && diffVersions[1] ? (
                 <div className="flex-1 overflow-y-auto space-y-4">
                   <div className="flex items-center justify-between">
                     <p className="text-[10px] font-black text-(--fg-label) uppercase tracking-widest">
                       Comparing: {diffVersions[0].label || `#${diffVersions[0].id}`} vs {diffVersions[1].label || `#${diffVersions[1].id}`}
                     </p>
-                    <button
-                      onClick={() => { setShowDiff(false); setDiffVersions([null, null]); }}
-                      className="text-[9px] font-black text-[#00AEEF] uppercase tracking-widest"
-                    >
-                      Back to list
-                    </button>
                   </div>
                   <div className="bg-(--bg-input) rounded-xl p-4 border border-(--border) font-mono text-[10px] leading-relaxed overflow-auto max-h-[50vh]">
                     {computeDiffLines(diffVersions[0].content, diffVersions[1].content).map((line, i) => (
@@ -1468,7 +1398,10 @@ export default function App() {
                     ))}
                   </div>
                 </div>
-              ) : (
+              )
+
+              /* List View */
+              : (
                 <div className="flex-1 overflow-y-auto space-y-2 custom-scrollbar">
                   {historyLoading ? (
                     <div className="flex items-center justify-center py-12">
@@ -1481,67 +1414,112 @@ export default function App() {
                       <p className="text-[10px] mt-1">Save a prompt to start tracking history</p>
                     </div>
                   ) : (
-                    historyData.map((version) => (
-                      <div
-                        key={version.id}
-                        className="bg-(--bg-input) border border-(--border) rounded-xl p-4 hover:border-(--border-hover) transition-all group"
-                      >
-                        <div className="flex items-start justify-between gap-4">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              {version.label && (
-                                <span className="text-[10px] font-black text-[#00AEEF] uppercase">{version.label}</span>
-                              )}
-                              <span className="text-[9px] text-(--fg-faint) font-mono">#{version.id}</span>
+                    historyData.map((version) => {
+                      const isApplied = appliedVersionId === version.id || (appliedVersionId === null && version.content === savedBrandRules);
+                      return (
+                        <div
+                          key={version.id}
+                          className={cn(
+                            "bg-(--bg-input) border rounded-xl p-4 hover:border-(--border-hover) transition-all group",
+                            isApplied ? "border-green-500/30" : "border-(--border)"
+                          )}
+                        >
+                          <div className="flex items-start gap-3">
+                            {/* Star button */}
+                            <button
+                              onClick={() => handleToggleStar(version)}
+                              className="mt-0.5 shrink-0 transition-colors"
+                            >
+                              <Star
+                                className={cn(
+                                  "w-4 h-4 transition-colors",
+                                  version.starred
+                                    ? "text-yellow-400 fill-yellow-400"
+                                    : "text-(--fg-dim) hover:text-yellow-400"
+                                )}
+                              />
+                            </button>
+
+                            <div
+                              className="flex-1 min-w-0 cursor-pointer"
+                              onClick={() => { setViewingVersion(version); setDetailNotesText(''); }}
+                            >
+                              <div className="flex items-center gap-2 mb-1">
+                                {version.label && (
+                                  <span className="text-[10px] font-black text-[#00AEEF] uppercase">{version.label}</span>
+                                )}
+                                <span className="text-[9px] text-(--fg-faint) font-mono">#{version.id}</span>
+                                {isApplied && (
+                                  <span className="flex items-center gap-1 px-2 py-0.5 bg-green-500/10 border border-green-500/20 rounded-md text-[8px] font-black text-green-400 uppercase tracking-widest">
+                                    <Check className="w-2.5 h-2.5" />
+                                    Active
+                                  </span>
+                                )}
+                                {version.notes && (
+                                  <span className="flex items-center gap-1 text-[9px] text-(--fg-dim)">
+                                    <MessageSquare className="w-3 h-3" />
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[10px] text-(--fg-label) truncate">{version.content.slice(0, 120)}...</p>
+                              <div className="flex items-center gap-3 mt-2 text-[9px] text-(--fg-dim)">
+                                <span>{new Date(version.created_at + 'Z').toLocaleString()}</span>
+                                {version.author && (
+                                  <span className="flex items-center gap-1">
+                                    <Users className="w-3 h-3" />
+                                    {version.author}
+                                  </span>
+                                )}
+                              </div>
                             </div>
-                            <p className="text-[10px] text-(--fg-label) truncate">{version.content.slice(0, 120)}...</p>
-                            <div className="flex items-center gap-3 mt-2 text-[9px] text-(--fg-dim)">
-                              <span>{new Date(version.created_at + 'Z').toLocaleString()}</span>
-                              {version.author && (
-                                <span className="flex items-center gap-1">
-                                  <Users className="w-3 h-3" />
-                                  {version.author}
+
+                            {/* Action buttons */}
+                            <div className="flex items-center gap-2 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
+                              <button
+                                onClick={() => { setViewingVersion(version); setDetailNotesText(''); }}
+                                className="px-3 py-1.5 bg-(--bg-surface) text-(--fg-label) border border-(--border) rounded-lg text-[8px] font-black uppercase tracking-widest hover:text-(--fg-secondary) transition-all flex items-center gap-1"
+                              >
+                                <Maximize2 className="w-3 h-3" />
+                                View
+                              </button>
+                              <button
+                                onClick={() => {
+                                  if (diffVersions[0] === null) {
+                                    setDiffVersions([version, null]);
+                                  } else if (diffVersions[1] === null) {
+                                    setDiffVersions([diffVersions[0], version]);
+                                    setShowDiff(true);
+                                  } else {
+                                    setDiffVersions([version, null]);
+                                  }
+                                }}
+                                className={cn(
+                                  "px-3 py-1.5 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all border",
+                                  diffVersions[0]?.id === version.id
+                                    ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/30"
+                                    : "bg-(--bg-surface) text-(--fg-label) border-(--border) hover:text-(--fg-secondary)"
+                                )}
+                              >
+                                {diffVersions[0]?.id === version.id ? 'Selected' : 'Compare'}
+                              </button>
+                              {isApplied ? (
+                                <span className="px-3 py-1.5 bg-green-500/10 text-green-400 border border-green-500/20 rounded-lg text-[8px] font-black uppercase tracking-widest flex items-center gap-1">
+                                  <Check className="w-3 h-3" />
+                                  Applied
                                 </span>
+                              ) : (
+                                <button
+                                  onClick={() => handleApplyVersion(version)}
+                                  className="px-3 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all"
+                                >
+                                  Apply
+                                </button>
                               )}
                             </div>
-                            {version.notes && (
-                              <p className="text-[9px] text-(--fg-faint) mt-1.5 flex items-start gap-1">
-                                <MessageSquare className="w-3 h-3 mt-0.5 shrink-0" />
-                                {version.notes}
-                              </p>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-2 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
-                            <button
-                              onClick={() => {
-                                if (diffVersions[0] === null) {
-                                  setDiffVersions([version, null]);
-                                } else if (diffVersions[1] === null) {
-                                  setDiffVersions([diffVersions[0], version]);
-                                  setShowDiff(true);
-                                } else {
-                                  setDiffVersions([version, null]);
-                                }
-                              }}
-                              className={cn(
-                                "px-3 py-1.5 rounded-lg text-[8px] font-black uppercase tracking-widest transition-all border",
-                                diffVersions[0]?.id === version.id
-                                  ? "bg-yellow-500/10 text-yellow-400 border-yellow-500/30"
-                                  : "bg-(--bg-surface) text-(--fg-label) border-(--border) hover:text-(--fg-secondary)"
-                              )}
-                            >
-                              {diffVersions[0]?.id === version.id ? 'Selected' : 'Compare'}
-                            </button>
-                            <button
-                              onClick={() => handleRestoreVersion(version)}
-                              className="px-3 py-1.5 bg-[#00AEEF]/10 text-[#00AEEF] border border-[#00AEEF]/30 rounded-lg text-[8px] font-black uppercase tracking-widest hover:bg-[#00AEEF]/20 transition-all"
-                            >
-                              Restore
-                            </button>
                           </div>
                         </div>
-                      </div>
-                    ))
+                      );
+                    })
                   )}
                 </div>
               )}
