@@ -1,3 +1,5 @@
+import { supabase } from './supabase';
+
 interface PromptVersion {
   id: number;
   brand_key: string;
@@ -51,6 +53,74 @@ function writeJSON(key: string, value: unknown) {
   localStorage.setItem(key, JSON.stringify(value));
 }
 
+// Pull all data from Supabase into localStorage on app init
+export async function syncFromSupabase() {
+  if (!supabase) return;
+  try {
+    const [versionsRes, configsRes, refsRes] = await Promise.all([
+      supabase.from('prompt_versions').select('*').order('id', { ascending: true }),
+      supabase.from('brand_configs').select('*'),
+      supabase.from('reference_images').select('*').order('id', { ascending: true }),
+    ]);
+
+    if (versionsRes.data?.length) {
+      writeJSON(KEYS.versions, versionsRes.data);
+      const maxId = Math.max(...versionsRes.data.map((v: any) => v.id), 0);
+      const refsMaxId = refsRes.data?.length ? Math.max(...refsRes.data.map((r: any) => r.id), 0) : 0;
+      const currentNextId = parseInt(localStorage.getItem(KEYS.nextId) || '0', 10);
+      const newMax = Math.max(maxId, refsMaxId, currentNextId);
+      localStorage.setItem(KEYS.nextId, String(newMax));
+    }
+    if (configsRes.data?.length) {
+      writeJSON(KEYS.configs, configsRes.data);
+    }
+    if (refsRes.data?.length) {
+      writeJSON(KEYS.refs, refsRes.data);
+    }
+  } catch (err) {
+    console.warn('Supabase sync failed, using localStorage:', err);
+  }
+}
+
+function upsertBrandConfig(brandKey: string, promptType: string, content: string) {
+  const colMap: Record<string, keyof BrandConfig> = {
+    brand_rules: 'active_brand_rules',
+    generation_template: 'active_generation_template',
+    refinement_template: 'active_refinement_template',
+  };
+  const col = colMap[promptType];
+  if (!col) return;
+
+  const configs = readJSON<BrandConfig[]>(KEYS.configs, []);
+  const now = new Date().toISOString();
+  const idx = configs.findIndex(c => c.brand_key === brandKey);
+  if (idx >= 0) {
+    configs[idx][col] = content as any;
+    configs[idx].updated_at = now;
+  } else {
+    const newConfig: BrandConfig = {
+      brand_key: brandKey,
+      active_brand_rules: null,
+      active_generation_template: null,
+      active_refinement_template: null,
+      updated_at: now,
+    };
+    newConfig[col] = content as any;
+    configs.push(newConfig);
+  }
+  writeJSON(KEYS.configs, configs);
+
+  if (supabase) {
+    supabase.from('brand_configs').upsert({
+      brand_key: brandKey,
+      [col]: content,
+      updated_at: now,
+    }, { onConflict: 'brand_key' }).then(({ error }) => {
+      if (error) console.warn('Supabase brand_configs upsert failed:', error);
+    });
+  }
+}
+
 export function savePromptVersion(params: {
   brandKey: string;
   promptType: string;
@@ -69,42 +139,33 @@ export function savePromptVersion(params: {
     label: params.label ?? '',
     author: params.author ?? '',
     notes: params.notes ?? '',
-    created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
+    created_at: new Date().toISOString(),
     starred: 0,
   };
   versions.push(version);
   writeJSON(KEYS.versions, versions);
-
   upsertBrandConfig(params.brandKey, params.promptType, params.content);
-  return { id };
-}
 
-function upsertBrandConfig(brandKey: string, promptType: string, content: string) {
-  const colMap: Record<string, keyof BrandConfig> = {
-    brand_rules: 'active_brand_rules',
-    generation_template: 'active_generation_template',
-    refinement_template: 'active_refinement_template',
-  };
-  const col = colMap[promptType];
-  if (!col) return;
-
-  const configs = readJSON<BrandConfig[]>(KEYS.configs, []);
-  const idx = configs.findIndex(c => c.brand_key === brandKey);
-  if (idx >= 0) {
-    configs[idx][col] = content as any;
-    configs[idx].updated_at = new Date().toISOString().replace('T', ' ').slice(0, 19);
-  } else {
-    const newConfig: BrandConfig = {
-      brand_key: brandKey,
-      active_brand_rules: null,
-      active_generation_template: null,
-      active_refinement_template: null,
-      updated_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-    };
-    newConfig[col] = content as any;
-    configs.push(newConfig);
+  if (supabase) {
+    supabase.from('prompt_versions').insert({
+      brand_key: version.brand_key,
+      prompt_type: version.prompt_type,
+      content: version.content,
+      label: version.label,
+      author: version.author,
+      notes: version.notes,
+      starred: version.starred,
+    }).select('id').single().then(({ data, error }) => {
+      if (error) { console.warn('Supabase insert prompt_versions failed:', error); return; }
+      if (data) {
+        const vs = readJSON<PromptVersion[]>(KEYS.versions, []);
+        const v = vs.find(v => v.id === id);
+        if (v) { v.id = data.id; writeJSON(KEYS.versions, vs); }
+      }
+    });
   }
-  writeJSON(KEYS.configs, configs);
+
+  return { id };
 }
 
 export function getActiveBrandConfig(brandKey: string): BrandConfig | null {
@@ -133,6 +194,12 @@ export function togglePromptStar(id: number): { id: number; starred: number } | 
   if (!version) return null;
   version.starred = version.starred ? 0 : 1;
   writeJSON(KEYS.versions, versions);
+
+  if (supabase) {
+    supabase.from('prompt_versions').update({ starred: version.starred }).eq('id', id)
+      .then(({ error }) => { if (error) console.warn('Supabase star update failed:', error); });
+  }
+
   return { id, starred: version.starred };
 }
 
@@ -142,6 +209,12 @@ export function updatePromptNotes(id: number, notes: string): { id: number; note
   if (!version) return null;
   version.notes = notes;
   writeJSON(KEYS.versions, versions);
+
+  if (supabase) {
+    supabase.from('prompt_versions').update({ notes }).eq('id', id)
+      .then(({ error }) => { if (error) console.warn('Supabase notes update failed:', error); });
+  }
+
   return { id, notes };
 }
 
@@ -153,19 +226,40 @@ export function getReferenceImages(brandKey: string): ReferenceImage[] {
 export function addReferenceImage(brandKey: string, url: string): { id: number } {
   const refs = readJSON<ReferenceImage[]>(KEYS.refs, []);
   const id = getNextId();
-  refs.push({
+  const ref: ReferenceImage = {
     id,
     brand_key: brandKey,
     url,
-    created_at: new Date().toISOString().replace('T', ' ').slice(0, 19),
-  });
+    created_at: new Date().toISOString(),
+  };
+  refs.push(ref);
   writeJSON(KEYS.refs, refs);
+
+  if (supabase) {
+    supabase.from('reference_images').insert({
+      brand_key: brandKey,
+      url,
+    }).select('id').single().then(({ data, error }) => {
+      if (error) { console.warn('Supabase insert reference_images failed:', error); return; }
+      if (data) {
+        const rs = readJSON<ReferenceImage[]>(KEYS.refs, []);
+        const r = rs.find(r => r.id === id);
+        if (r) { r.id = data.id; writeJSON(KEYS.refs, rs); }
+      }
+    });
+  }
+
   return { id };
 }
 
 export function removeReferenceImage(id: number) {
   const refs = readJSON<ReferenceImage[]>(KEYS.refs, []);
   writeJSON(KEYS.refs, refs.filter(r => r.id !== id));
+
+  if (supabase) {
+    supabase.from('reference_images').delete().eq('id', id)
+      .then(({ error }) => { if (error) console.warn('Supabase delete reference_images failed:', error); });
+  }
 }
 
 export function exportBrandConfig(brandKey: string) {

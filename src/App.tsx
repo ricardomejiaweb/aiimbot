@@ -326,18 +326,20 @@ export default function App() {
   const importFileRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
-    const checkKey = async () => {
+    const init = async () => {
       if (window.aistudio?.hasSelectedApiKey) {
         const hasKey = await window.aistudio.hasSelectedApiKey();
         setHasApiKey(hasKey);
       } else {
         setHasApiKey(true);
       }
+      await storage.syncFromSupabase();
+      loadBrandConfig(selectedBrand);
+      loadStoredRefs(selectedBrand);
     };
-    checkKey();
+    init();
   }, []);
 
-  // Load saved prompts and references when brand changes
   useEffect(() => {
     loadBrandConfig(selectedBrand);
     loadStoredRefs(selectedBrand);
