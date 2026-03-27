@@ -286,7 +286,7 @@ export default function App() {
   const [refinementPrompt, setRefinementPrompt] = useState('');
   const [error, setError] = useState<string | null>(null);
   const [hasApiKey, setHasApiKey] = useState(false);
-  const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('aiim-theme') as 'dark' | 'light') || 'dark');
+  const [theme, setTheme] = useState<'dark' | 'light'>(() => (localStorage.getItem('aiim-theme') as 'dark' | 'light') || 'light');
 
   const toggleTheme = () => {
     const next = theme === 'dark' ? 'light' : 'dark';
